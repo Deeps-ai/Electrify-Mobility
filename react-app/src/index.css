@@ -34,8 +34,14 @@ body {
 .leaflet-container {
   height: 100%;
   width: 100%;
-  background-color: #1f2937;
+  background-color: #030712;
   touch-action: none;
+}
+
+/* OpenStreetMap Dark Mode Tile Filter (turns standard OSM tiles into a sleek dark map) */
+.dark-tiles .leaflet-tile,
+.dark-tiles img {
+  filter: brightness(0.65) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.75);
 }
 
 .custom-scrollbar::-webkit-scrollbar { width: 5px; }

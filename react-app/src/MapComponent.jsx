@@ -19,11 +19,46 @@ L.Icon.Default.mergeOptions({
 
 const MAP_CENTER = [28.6139, 77.2090];
 const MAP_ZOOM = 11;
-const TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
 // Configurable OSRM service URL with public demo server as fallback
 const OSRM_SERVICE_URL = import.meta.env.VITE_OSRM_URL || 'https://router.project-osrm.org/route/v1';
+
+// Optional Carto API Key (from carto.com/basemaps/apikey)
+const CARTO_API_KEY = import.meta.env.VITE_CARTO_API_KEY || '';
+
+const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const CARTO_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
+/**
+ * Returns tile URL, attribution, and CSS class based on the selected layer.
+ * - 'dark': Uses CartoDB if an API key is set, or OpenStreetMap with dark CSS filter (no key required, zero watermarks).
+ * - 'street': Standard full-color OpenStreetMap tiles.
+ * @param {'dark'|'street'} layerType
+ */
+const getTileSettings = (layerType) => {
+  if (layerType === 'dark') {
+    if (CARTO_API_KEY) {
+      return {
+        url: `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_API_KEY}`,
+        attribution: CARTO_ATTRIBUTION,
+        className: '',
+      };
+    }
+    // High-performance OpenStreetMap with dark CSS filter: 100% free, no API key, zero watermarks
+    return {
+      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      attribution: OSM_ATTRIBUTION,
+      className: 'dark-tiles',
+    };
+  }
+
+  // Standard OpenStreetMap street view
+  return {
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: OSM_ATTRIBUTION,
+    className: '',
+  };
+};
 
 /**
  * Validates geographical coordinates (latitude [-90, 90], longitude [-180, 180]).
@@ -311,6 +346,9 @@ export default function MapComponent({
 }) {
   const [routeErrorToast, setRouteErrorToast] = useState(null);
   const [prevActiveRoute, setPrevActiveRoute] = useState(activeRoute);
+  const [layerType, setLayerType] = useState('dark');
+
+  const tileSettings = useMemo(() => getTileSettings(layerType), [layerType]);
 
   // Reset error toast when activeRoute changes
   if (activeRoute !== prevActiveRoute) {
@@ -428,6 +466,34 @@ export default function MapComponent({
 
   return (
     <div className="h-full w-full relative min-h-[250px] md:min-h-0">
+      {/* Map Layer Switcher: toggle between Dark view and OpenStreetMap Street view */}
+      <div className="absolute top-2.5 left-2.5 z-[1000] flex items-center bg-gray-900/90 border border-gray-700/80 rounded-xl p-0.5 shadow-lg backdrop-blur-md">
+        <button
+          type="button"
+          onClick={() => setLayerType('dark')}
+          className={`px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1 ${
+            layerType === 'dark'
+              ? 'bg-emerald-500 text-gray-950 font-bold shadow-sm'
+              : 'text-gray-300 hover:text-white hover:bg-gray-800'
+          }`}
+          title="Switch to Dark map"
+        >
+          <span>🌙 Dark</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setLayerType('street')}
+          className={`px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1 ${
+            layerType === 'street'
+              ? 'bg-emerald-500 text-gray-950 font-bold shadow-sm'
+              : 'text-gray-300 hover:text-white hover:bg-gray-800'
+          }`}
+          title="Switch to standard OpenStreetMap Street view"
+        >
+          <span>🗺️ Street</span>
+        </button>
+      </div>
+
       {/* Non-blocking inline routing error toast */}
       {routeErrorToast && (
         <div 
@@ -455,7 +521,13 @@ export default function MapComponent({
         touchZoom={true}
         dragging={true}
       >
-        <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} />
+        <TileLayer 
+          key={layerType}
+          url={tileSettings.url} 
+          attribution={tileSettings.attribution} 
+          className={tileSettings.className}
+          maxZoom={19}
+        />
         
         {stationMarkers}
 
