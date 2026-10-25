@@ -23,6 +23,21 @@ const {
   getLocalFeedbackList,
   REPORT_EXPIRY_MS,
   REPORT_THROTTLE_MS,
+  getHomeChargers,
+  getApprovedHomeChargers,
+  addHomeCharger,
+  updateHomeCharger,
+  deleteHomeCharger,
+  adminSetListingStatus,
+  addBookingRequest,
+  getBookingRequests,
+  updateBookingStatus,
+  getComplaints,
+  addComplaint,
+  updateComplaintStatus,
+  getChargerRequests,
+  updateChargerRequestStatus,
+  getAdminAuditLog,
 } = await import('./src/services/storageAdapter.js');
 
 console.log('--- Testing Storage Adapter (Phase 1) ---');
@@ -147,4 +162,133 @@ const resilientReviews = getReviews(201);
 assert(Array.isArray(resilientReviews), 'Should handle malformed reviews JSON gracefully');
 console.log('✓ TEST 7 Passed: Safe error handling and malformed data resilience verified.');
 
-console.log('\nALL 7 TESTS PASSED SUCCESSFULLY! 🚀');
+// TEST 8: Homeowner charger creation & validation
+const initialChargers = getHomeChargers();
+const newListing = addHomeCharger({
+  title: 'Sector 50 Villa Private 11kW Type-2',
+  owner_name: 'Vikram Mehta',
+  phone: '+91 98765 43210',
+  full_address: 'House 42, Block C, Nirvana Country, Sector 50, Gurugram',
+  is_address_public: false,
+  approx_address: 'Nirvana Country, Sector 50, Gurugram',
+  latitude: 28.418,
+  longitude: 77.062,
+  connector_type: 'Type 2 AC',
+  power_kw: 11,
+  pricing_rate: 13,
+  pricing_unit: 'per_kwh',
+  schedule: 'Daily 7:00 PM - 11:00 PM',
+  booking_preference: 'in_app',
+  access_instructions: 'Ring bell at gate #2. Extension cable available if needed.',
+});
+
+assert.strictEqual(newListing.success, true, 'Listing creation should succeed');
+assert(newListing.charger && newListing.charger.id, 'Created charger must have an id');
+assert.strictEqual(newListing.charger.status, 'pending', 'New listing should start in "pending" status');
+assert.strictEqual(newListing.charger.is_address_public, false, 'is_address_public should be preserved');
+assert.strictEqual(getHomeChargers().length, initialChargers.length + 1, 'Total chargers should increment by 1');
+console.log('✓ TEST 8 Passed: Homeowner charger creation and pending status verified.');
+
+// TEST 9: Admin portal actions on listings (Approve, Pause, Decline)
+// It should NOT be in approved list initially
+const approvedBefore = getApprovedHomeChargers();
+assert(!approvedBefore.some(c => c.id === newListing.charger.id), 'Pending charger must not be in approved list');
+
+// Admin Approves
+const approveRes = adminSetListingStatus(newListing.charger.id, 'approved', 'Verified owner contact');
+assert.strictEqual(approveRes.success, true);
+assert.strictEqual(approveRes.charger.status, 'approved');
+
+const approvedAfter = getApprovedHomeChargers();
+assert(approvedAfter.some(c => c.id === newListing.charger.id), 'Approved charger must now be in approved list');
+
+// Admin Pauses
+const pauseRes = adminSetListingStatus(newListing.charger.id, 'paused', 'Temporary pause');
+assert.strictEqual(pauseRes.success, true);
+assert.strictEqual(pauseRes.charger.status, 'paused');
+assert(!getApprovedHomeChargers().some(c => c.id === newListing.charger.id), 'Paused charger should not appear in active discovery');
+
+// Admin Declines with reason
+const declineRes = adminSetListingStatus(newListing.charger.id, 'declined', 'Address could not be verified');
+assert.strictEqual(declineRes.success, true);
+assert.strictEqual(declineRes.charger.status, 'declined');
+assert.strictEqual(declineRes.charger.declined_reason, 'Address could not be verified');
+
+// Re-approve for downstream tests
+adminSetListingStatus(newListing.charger.id, 'approved', 'Re-verified');
+console.log('✓ TEST 9 Passed: Admin listing lifecycle (pending -> approved -> paused -> declined) verified.');
+
+// TEST 10: Homeowner edit and delete
+const updatedRes = updateHomeCharger(newListing.charger.id, {
+  pricing_rate: 14,
+  schedule: 'Mon-Fri 6:00 PM - 10:00 PM',
+});
+assert.strictEqual(updatedRes.success, true);
+assert.strictEqual(updatedRes.charger.pricing_rate, 14);
+assert.strictEqual(updatedRes.charger.schedule, 'Mon-Fri 6:00 PM - 10:00 PM');
+console.log('✓ TEST 10 Passed: Homeowner listing update verified.');
+
+// TEST 11: EV Driver booking requests
+const bookingRes = addBookingRequest({
+  charger_id: newListing.charger.id,
+  driver_name: 'Rohit Sharma',
+  driver_phone: '+91 99112 33445',
+  vehicle_model: 'Tata Nexon EV Max',
+  date: '2026-10-26',
+  time_slot: '07:00 PM - 09:00 PM',
+  duration_hours: 2,
+  notes: 'Need 50% top-up for morning airport run',
+});
+
+assert.strictEqual(bookingRes.success, true);
+assert(bookingRes.booking && bookingRes.booking.id);
+assert.strictEqual(bookingRes.booking.status, 'pending_host');
+
+const hostBookings = getBookingRequests(newListing.charger.id);
+assert(hostBookings.some(b => b.id === bookingRes.booking.id), 'Booking request should be retrievable for host');
+
+// Host confirms booking
+const confirmedRes = updateBookingStatus(bookingRes.booking.id, 'confirmed');
+assert.strictEqual(confirmedRes.success, true);
+assert.strictEqual(confirmedRes.booking.status, 'confirmed');
+console.log('✓ TEST 11 Passed: Driver booking request creation and host confirmation verified.');
+
+// TEST 12: Complaints & Public Charger Requests
+const allCompsInitial = getComplaints();
+assert(Array.isArray(allCompsInitial), 'getComplaints returns array');
+
+const compRes = addComplaint({
+  category: 'charger_fault',
+  subject: 'Gun 2 latch broken',
+  description: 'Gun 2 CCS2 latch is cracked and does not lock into Nexon EV.',
+  target_id: '201',
+  complainant_name: 'Ananya S.',
+  contact: 'ananya@example.com',
+});
+assert.strictEqual(compRes.success, true);
+assert.strictEqual(compRes.complaint.status, 'open');
+
+const updateComp = updateComplaintStatus(compRes.complaint.id, 'in_progress', 'Technician dispatched');
+assert.strictEqual(updateComp.success, true);
+assert.strictEqual(updateComp.complaint.status, 'in_progress');
+
+const allReqs = getChargerRequests();
+assert(Array.isArray(allReqs) && allReqs.length > 0, 'getChargerRequests returns requests list');
+
+const updateReq = updateChargerRequestStatus('req_1', 'planned', 'Added to Q1 2027 deployment pipeline');
+assert.strictEqual(updateReq.success, true);
+assert.strictEqual(updateReq.request.status, 'planned');
+
+// Test deletion of charger
+const delSuccess = deleteHomeCharger(newListing.charger.id);
+assert.strictEqual(delSuccess, true, 'deleteHomeCharger should return true');
+assert(!getHomeChargers().some(c => c.id === newListing.charger.id), 'Deleted charger should not be in list');
+console.log('✓ TEST 12 Passed: Complaints, charger requests, and deletion verified.');
+
+// TEST 13: Admin audit logging
+const auditLogs = getAdminAuditLog();
+assert(Array.isArray(auditLogs) && auditLogs.length >= 3, 'Audit logs should track admin actions');
+assert(auditLogs.some(log => log.entity_type === 'home_charger'), 'Should log home charger moderation');
+console.log('✓ TEST 13 Passed: Admin audit trail recorded successfully.');
+
+console.log('\nALL 13 TESTS PASSED SUCCESSFULLY! 🚀');

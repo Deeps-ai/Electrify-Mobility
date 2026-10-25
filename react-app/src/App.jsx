@@ -1,6 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { DELHI_NCR_STATIONS } from './data';
 import MapComponent from './MapComponent';
+import HomeownerListingModal from './components/HomeownerListingModal';
+import HomeownerBookingModal from './components/HomeownerBookingModal';
+import AdminPortal from './components/AdminPortal';
 import {
   getStations,
   getReportsByStation,
@@ -10,22 +13,25 @@ import {
   submitFeedback,
   getLocalFeedbackList,
   getThrottleStatus,
+  getHomeChargers,
 } from './services/storageAdapter';
 import { 
   Search, 
   Zap, 
   MapPin, 
   Locate, 
-  PlusCircle, 
   CheckCircle2, 
   Navigation, 
   X, 
   Activity, 
-  Clock,
-  Star,
-  MessageSquare,
-  Info,
-  AlertTriangle
+  Clock, 
+  Star, 
+  MessageSquare, 
+  Info, 
+  AlertTriangle,
+  Home,
+  Shield,
+  Lock
 } from 'lucide-react';
 
 /**
@@ -50,7 +56,17 @@ function formatRelativeTime(isoString, now) {
 }
 
 export default function App() {
-  const [stations, setStations] = useState(DELHI_NCR_STATIONS);
+  // Navigation / View Mode: 'app' (Driver Map) vs 'admin' (Admin Portal as separate interface)
+  const [viewMode, setViewMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return (window.location.hash === '#admin' || window.location.pathname.startsWith('/admin')) ? 'admin' : 'app';
+    }
+    return 'app';
+  });
+
+  // Base data states
+  const [publicStations, setPublicStations] = useState(DELHI_NCR_STATIONS);
+  const [homeChargers, setHomeChargers] = useState(() => getHomeChargers('all'));
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [regionFilter, setRegionFilter] = useState('ALL');
@@ -66,9 +82,13 @@ export default function App() {
   const [localFeedbackItems, setLocalFeedbackItems] = useState(() => getLocalFeedbackList());
 
   // Modals state
-  const [bookingModal, setBookingModal] = useState(null);
+  const [bookingModal, setBookingModal] = useState(null); // Public station reservation
   const [selectedSlot, setSelectedSlot] = useState(null);
   
+  // Homeowner Modals state
+  const [isListingModalOpen, setIsListingModalOpen] = useState(false);
+  const [selectedBookingHomeCharger, setSelectedBookingHomeCharger] = useState(null);
+
   // Status Report Modal state
   const [reportModal, setReportModal] = useState(null);
   const [reportStatus, setReportStatus] = useState('working');
@@ -94,29 +114,70 @@ export default function App() {
   const [feedbackSuccess, setFeedbackSuccess] = useState(null);
   const [showFeedbackHistory, setShowFeedbackHistory] = useState(false);
 
-  // 1. Load stations via storage adapter
+  // 1. Sync viewMode with URL hash (#admin)
   useEffect(() => {
-    async function loadStations() {
-      const data = await getStations();
-      if (Array.isArray(data) && data.length > 0) {
-        setStations(data);
+    const handleHashChange = () => {
+      if (window.location.hash === '#admin') {
+        setViewMode('admin');
+      } else {
+        setViewMode('app');
       }
-    }
-    loadStations();
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('popstate', handleHashChange);
+
+    return () => {
+      window.removeEventListener('hashchange', handleHashChange);
+      window.removeEventListener('popstate', handleHashChange);
+    };
   }, []);
 
-  // 2. Periodic timer (every 60s) and window focus listeners to refresh relative times and purge expired (2h) reports
+  const navigateToAdmin = () => {
+    setViewMode('admin');
+    if (typeof window !== 'undefined') {
+      window.location.hash = '#admin';
+    }
+  };
+
+  const navigateToApp = () => {
+    setViewMode('app');
+    if (typeof window !== 'undefined' && window.location.hash === '#admin') {
+      window.history.pushState(null, '', window.location.pathname);
+    }
+  };
+
+  // 2. Load stations & homeowner chargers via storage adapter
+  const refreshAllData = useCallback(() => {
+    const current = Date.now();
+    setNow(current);
+    setReportsByStation(getReportsByStation(current));
+    setReviewsList(getReviews());
+    setHomeChargers(getHomeChargers('all'));
+    setLocalFeedbackItems(getLocalFeedbackList());
+  }, []);
+
   useEffect(() => {
-    const refreshData = () => {
+    async function loadData() {
+      const data = await getStations();
+      if (Array.isArray(data) && data.length > 0) {
+        setPublicStations(data);
+      }
+      refreshAllData();
+    }
+    loadData();
+  }, [refreshAllData]);
+
+  // 3. Periodic timer (every 60s) and window focus listeners
+  useEffect(() => {
+    const timer = setInterval(() => {
       const current = Date.now();
       setNow(current);
       setReportsByStation(getReportsByStation(current));
-    };
-
-    const timer = setInterval(refreshData, 60000);
+    }, 60000);
 
     const handleFocus = () => {
-      refreshData();
+      refreshAllData();
     };
 
     window.addEventListener('focus', handleFocus);
@@ -127,12 +188,18 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleFocus);
     };
-  }, []);
+  }, [refreshAllData]);
 
-  // 3. Rating stats per station (calculated from local reviews)
+  // 4. Combined discovery list: Public stations + Approved homeowner chargers
+  const allChargers = useMemo(() => {
+    const approvedHomes = homeChargers.filter(c => c.status === 'approved');
+    return [...publicStations, ...approvedHomes];
+  }, [publicStations, homeChargers]);
+
+  // 5. Rating stats per station (calculated from local reviews)
   const ratingsByStation = useMemo(() => {
     const map = {};
-    stations.forEach(st => {
+    allChargers.forEach(st => {
       const stationReviews = reviewsList.filter(r => String(r.station_id) === String(st.id));
       if (stationReviews.length === 0) {
         map[st.id] = { averageRating: null, reviewCount: 0 };
@@ -145,21 +212,35 @@ export default function App() {
       }
     });
     return map;
-  }, [stations, reviewsList]);
+  }, [allChargers, reviewsList]);
 
-  // 4. Station filtering
+  // 6. Charger filtering (by search, type: ALL | PUBLIC | HOME | DC_FAST | AC_SLOW, and region)
   const filteredStations = useMemo(() => {
-    return stations.filter(st => {
-      const matchSearch = (st.title || '').toLowerCase().includes(search.toLowerCase()) || 
-                          (st.address || '').toLowerCase().includes(search.toLowerCase()) ||
-                          (st.operator || '').toLowerCase().includes(search.toLowerCase());
-      const matchType = typeFilter === 'ALL' || st.type === typeFilter;
+    return allChargers.filter(st => {
+      const titleStr = (st.title || '').toLowerCase();
+      const addrStr = (st.address || st.exact_address || st.approx_address || '').toLowerCase();
+      const operatorStr = (st.operator || st.owner_name || '').toLowerCase();
+      const query = search.toLowerCase();
+
+      const matchSearch = titleStr.includes(query) || addrStr.includes(query) || operatorStr.includes(query);
+
+      let matchType = true;
+      if (typeFilter === 'PUBLIC') {
+        matchType = !st.is_homeowner;
+      } else if (typeFilter === 'HOME') {
+        matchType = Boolean(st.is_homeowner);
+      } else if (typeFilter === 'DC_FAST') {
+        matchType = st.type === 'DC_FAST';
+      } else if (typeFilter === 'AC_SLOW') {
+        matchType = st.type === 'AC_SLOW' || st.is_homeowner;
+      }
+
       const matchRegion = regionFilter === 'ALL' || st.region === regionFilter;
       return matchSearch && matchType && matchRegion;
     });
-  }, [stations, search, typeFilter, regionFilter]);
+  }, [allChargers, search, typeFilter, regionFilter]);
 
-  // Handle station card click: focus and fly to station, smooth scroll map into view on mobile
+  // Handle card click: focus station and smooth scroll map on mobile
   const handleStationClick = (st) => {
     setFocusedStation({ ...st });
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
@@ -178,7 +259,6 @@ export default function App() {
     setReportNote('');
     setReportFeedbackMsg(null);
 
-    // Check 5-minute throttle status for this charger on this browser
     const throttle = getThrottleStatus(st.id, Date.now());
     setReportThrottleState(throttle);
   }, []);
@@ -207,12 +287,10 @@ export default function App() {
       return;
     }
 
-    // Refresh reports
     setNow(submissionTime);
     setReportsByStation(getReportsByStation(submissionTime));
     setReportFeedbackMsg({ type: 'success', text: result.message });
 
-    // Close modal after brief confirmation
     setTimeout(() => {
       setReportModal(null);
       setReportFeedbackMsg(null);
@@ -290,13 +368,12 @@ export default function App() {
     setLocalFeedbackItems(getLocalFeedbackList());
   };
 
-  // Current station reviews for the reviews modal
   const currentStationReviews = useMemo(() => {
     if (!reviewsModal) return [];
     return reviewsList.filter(r => String(r.station_id) === String(reviewsModal.id));
   }, [reviewsModal, reviewsList]);
 
-  // Booking modal actions (Phase 1 local simulation)
+  // Public booking actions (Phase 1 local simulation)
   const openBooking = (st) => {
     setBookingModal(st);
     setSelectedSlot(null);
@@ -366,9 +443,15 @@ export default function App() {
     );
   };
 
+  // RENDER ADMIN PORTAL IF ON ADMIN ROUTE / VIEW MODE
+  if (viewMode === 'admin') {
+    return <AdminPortal onExit={navigateToApp} />;
+  }
+
+  // RENDER MAIN DRIVER & HOMEOWNER DISCOVERY EXPERIENCE
   return (
     <div className="bg-gray-950 text-gray-100 font-sans h-dvh flex flex-col overflow-hidden">
-      {/* Header with safe-area padding */}
+      {/* Header */}
       <header className="safe-header h-14 sm:h-16 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-3 sm:px-6 z-20 shrink-0">
         <div className="flex items-center space-x-2 sm:space-x-3">
           <div className="p-1.5 sm:p-2 bg-emerald-500 text-gray-950 rounded-xl flex items-center justify-center shrink-0 shadow-sm">
@@ -380,18 +463,19 @@ export default function App() {
                 Electrify <span className="text-emerald-400">Mobility</span>
               </h1>
               <span className="hidden lg:inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-                Phase 1: Local-only
+                Public & Home Chargers
               </span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center space-x-1.5 sm:space-x-2.5">
+        {/* Header Action Buttons */}
+        <div className="flex items-center space-x-1.5 sm:space-x-2">
           {activeRoute && (
             <button 
               type="button"
               onClick={() => setActiveRoute(null)} 
-              className="flex items-center gap-1 sm:gap-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 font-medium px-2 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+              className="flex items-center gap-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 font-medium px-2 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
               title="Clear active route"
             >
               <X className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> 
@@ -399,35 +483,46 @@ export default function App() {
             </button>
           )}
 
+          {/* Homeowner Charger Listing Button */}
+          <button 
+            type="button"
+            onClick={() => setIsListingModalOpen(true)}
+            className="flex items-center gap-1 sm:gap-1.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 font-bold px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer shadow-sm"
+            title="List your private home EV charger for rent"
+          >
+            <Home className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-400" />
+            <span className="hidden min-[480px]:inline">List Charger</span>
+          </button>
+
           <button 
             type="button"
             onClick={() => openGeneralFeedback('suggestion')}
-            className="flex items-center gap-1 sm:gap-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-medium px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
-            title="Send local feedback or report a bug"
+            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+            title="Send local feedback"
           >
-            <MessageSquare className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400" /> 
-            <span className="hidden min-[400px]:inline">Feedback</span>
+            <MessageSquare className="w-3.5 h-3.5 text-emerald-400" /> 
+            <span className="hidden min-[580px]:inline">Feedback</span>
           </button>
 
           <button 
             type="button"
             onClick={locateUser} 
-            className="flex items-center gap-1 sm:gap-1.5 bg-gray-800 text-emerald-400 border border-emerald-500/30 font-medium px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+            className="flex items-center gap-1 bg-gray-800 text-emerald-400 border border-emerald-500/30 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
             title="Locate nearest chargers"
           >
-            <Locate className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> 
-            <span className="hidden min-[400px]:inline">Near Me</span>
+            <Locate className="w-3.5 h-3.5" /> 
+            <span className="hidden min-[580px]:inline">Near Me</span>
           </button>
 
+          {/* Admin Portal Gateway */}
           <button 
             type="button"
-            onClick={() => openGeneralFeedback('missing_charger')} 
-            className="flex items-center gap-1 sm:gap-1.5 bg-emerald-500 hover:bg-emerald-400 text-gray-950 font-bold px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
-            title="Submit a missing charger or location"
+            onClick={navigateToAdmin}
+            className="flex items-center gap-1 bg-gray-900 hover:bg-purple-950/60 text-purple-400 border border-purple-800/80 font-bold px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+            title="Switch to Admin Portal (Approvals & Complaints)"
           >
-            <PlusCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> 
-            <span className="hidden min-[400px]:inline sm:hidden">Add</span>
-            <span className="hidden sm:inline">Add Charger</span>
+            <Shield className="w-3.5 h-3.5" /> 
+            <span className="hidden min-[680px]:inline">Admin</span>
           </button>
         </div>
       </header>
@@ -441,9 +536,15 @@ export default function App() {
           <div className="bg-emerald-950/40 border-b border-emerald-500/20 px-3 py-1.5 text-[11px] text-emerald-300 flex items-center justify-between shrink-0">
             <span className="flex items-center gap-1.5">
               <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>Phase 1: Status reports & reviews stored on this device</span>
+              <span>Public stations & rentable home chargers (Prototype)</span>
             </span>
-            <span className="text-[10px] text-emerald-400/80 font-mono">2h expiry</span>
+            <button
+              type="button"
+              onClick={() => setIsListingModalOpen(true)}
+              className="text-[10px] text-purple-400 hover:underline font-bold"
+            >
+              + List Mine
+            </button>
           </div>
 
           {/* Search and Filters */}
@@ -452,7 +553,7 @@ export default function App() {
               <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
               <input 
                 type="text" 
-                placeholder="Search station or location..." 
+                placeholder="Search station, host, or area..." 
                 value={search} 
                 onChange={e => setSearch(e.target.value)}
                 className="w-full pl-9 pr-3 py-1.5 bg-gray-950 border border-gray-800 rounded-xl text-xs sm:text-sm text-gray-100 focus:outline-none focus:border-emerald-500 transition" 
@@ -464,9 +565,11 @@ export default function App() {
                 onChange={e => setTypeFilter(e.target.value)} 
                 className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-2 focus:outline-none focus:border-emerald-500"
               >
-                <option value="ALL">All Speeds</option>
-                <option value="DC_FAST">⚡ DC Fast Charger</option>
-                <option value="AC_SLOW">🔌 Level 2 AC</option>
+                <option value="ALL">All Chargers (Public & Home)</option>
+                <option value="PUBLIC">⚡ Public Stations Only</option>
+                <option value="HOME">🏠 Rentable Home Chargers</option>
+                <option value="DC_FAST">⚡ DC Fast Only</option>
+                <option value="AC_SLOW">🔌 Level 2 AC Only</option>
               </select>
               <select 
                 value={regionFilter} 
@@ -483,19 +586,105 @@ export default function App() {
           </div>
 
           <div className="px-3 sm:px-4 py-2 bg-gray-950 border-b border-gray-800/80 flex justify-between text-xs font-semibold text-gray-400 shrink-0">
-            <span className="flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-emerald-400" /> CHARGERS IN NCR</span>
-            <span className="text-emerald-400 font-bold">{filteredStations.length} Stations</span>
+            <span className="flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-emerald-400" /> AVAILABLE IN NCR</span>
+            <span className="text-emerald-400 font-bold">{filteredStations.length} Chargers</span>
           </div>
 
           {/* Scrollable station cards list */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 sm:p-4 space-y-2.5 sm:space-y-3 safe-bottom min-h-0">
             {filteredStations.map(st => {
+              const ratingStats = ratingsByStation[st.id];
+
+              // ======================================================
+              // HOMEOWNER RENTABLE CHARGER CARD
+              // ======================================================
+              if (st.is_homeowner) {
+                const displayAddress = st.is_address_public
+                  ? (st.exact_address || st.address)
+                  : (st.approx_address || `${st.region} (Approximate area)`);
+
+                return (
+                  <div
+                    key={st.id}
+                    onClick={() => handleStationClick(st)}
+                    className="bg-gray-900 border border-purple-900/50 hover:border-purple-500 rounded-xl p-3 sm:p-4 transition cursor-pointer group shadow-sm relative overflow-hidden"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/30 flex items-center gap-1">
+                          🏠 Rentable Home Charger
+                        </span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">
+                          Host: {st.owner_name}
+                        </span>
+                      </div>
+
+                      <span className="font-black text-purple-400 text-xs shrink-0">
+                        {st.price}
+                      </span>
+                    </div>
+
+                    <h3 className="font-bold text-gray-100 text-sm mt-2 group-hover:text-purple-400 transition leading-snug">
+                      {st.title}
+                    </h3>
+                    <p className="text-xs text-gray-400 mt-1 flex items-start gap-1 leading-normal">
+                      <MapPin className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
+                      <span>{displayAddress}</span>
+                    </p>
+
+                    {!st.is_address_public && (
+                      <p className="text-[10px] text-purple-300 font-medium mt-1 flex items-center gap-1">
+                        <Lock className="w-3 h-3 text-purple-400 shrink-0" />
+                        <span>Approximate location shown. Exact address revealed upon booking confirmation.</span>
+                      </p>
+                    )}
+
+                    {/* Specs pill */}
+                    <div className="mt-2 grid grid-cols-2 gap-1.5 text-[11px] bg-purple-950/30 p-2 rounded-lg border border-purple-900/40 text-gray-300">
+                      <div><span className="text-gray-500">Power:</span> <strong>{st.power_kw} kW</strong></div>
+                      <div className="truncate"><span className="text-gray-500">Plug:</span> <strong>{st.connector}</strong></div>
+                      <div className="col-span-2 truncate text-[10px] text-gray-400">🕒 {st.schedule}</div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="mt-2.5 pt-2.5 border-t border-gray-800 flex items-center justify-between gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); openReviewsModal(st); }}
+                        className="flex items-center gap-1 text-amber-400 font-bold hover:underline cursor-pointer bg-gray-950/60 px-2 py-0.5 rounded border border-gray-800"
+                      >
+                        <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                        <span>{ratingStats?.averageRating ? `${ratingStats.averageRating} (${ratingStats.reviewCount})` : 'Reviews'}</span>
+                      </button>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setSelectedBookingHomeCharger(st); }}
+                          className="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded-lg transition font-bold cursor-pointer text-xs shadow-sm"
+                        >
+                          Request Booking
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); startRoute(st); }} 
+                          className="flex items-center gap-1 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white border border-blue-500/30 font-semibold px-2.5 py-1.5 rounded-lg transition cursor-pointer text-xs"
+                        >
+                          <Navigation className="w-3.5 h-3.5" /> Route
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              // ======================================================
+              // PUBLIC STATION CARD
+              // ======================================================
               const isFast = st.type === 'DC_FAST';
               const report = reportsByStation[st.id];
               const status = report?.status;
-              const ratingStats = ratingsByStation[st.id];
 
-              // Accessible badge representation
               const statusBadge = status === 'working' 
                 ? { label: '🟢 Working', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' }
                 : status === 'broken'
@@ -530,7 +719,7 @@ export default function App() {
                       type="button"
                       onClick={(e) => { e.stopPropagation(); openReportModal(st); }} 
                       className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded-lg text-xs font-semibold border border-gray-700 transition shrink-0 cursor-pointer"
-                      title="Report live charger status (Working, Broken, Occupied)"
+                      title="Report live charger status"
                     >
                       <Activity className="w-3.5 h-3.5 text-emerald-400" /> Report
                     </button>
@@ -549,12 +738,12 @@ export default function App() {
                       className="flex items-center gap-1 text-amber-400 font-bold hover:underline cursor-pointer bg-gray-950/60 px-2 py-0.5 rounded border border-gray-800"
                     >
                       <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                      <span>{ratingStats?.averageRating ? `${ratingStats.averageRating} (${ratingStats.reviewCount} reviews)` : 'No reviews yet'}</span>
+                      <span>{ratingStats?.averageRating ? `${ratingStats.averageRating} (${ratingStats.reviewCount})` : 'Reviews'}</span>
                     </button>
                     <span className="text-emerald-400 font-bold text-xs">{st.price || 'N/A'}</span>
                   </div>
 
-                  {/* Active Report Banner (with 2h relative time & note) */}
+                  {/* Active Report Banner */}
                   {report ? (
                     <div className="mt-2 text-[11px] text-gray-300 bg-gray-950/70 p-2 rounded-lg border border-gray-800">
                       <div className="flex items-center justify-between">
@@ -604,7 +793,7 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Map Area: 45% on mobile, flex-1 on desktop */}
+        {/* Map Area */}
         <main id="map-container" className="order-1 md:order-2 w-full md:w-auto h-[45%] md:h-full md:flex-1 min-h-[250px] md:min-h-0 relative bg-gray-800 shrink-0 md:shrink">
           <MapComponent 
             stations={filteredStations} 
@@ -615,6 +804,7 @@ export default function App() {
             onRoute={startRoute}
             onReport={openReportModal}
             onOpenReviews={openReviewsModal}
+            onRequestBooking={(charger) => setSelectedBookingHomeCharger(charger)}
             reportsByStation={reportsByStation}
             ratingsByStation={ratingsByStation}
           />
@@ -622,7 +812,27 @@ export default function App() {
       </div>
 
       {/* ====================================================================== */}
-      {/* MODAL 1: STATUS REPORT MODAL (Working / Broken / Occupied + 5m throttle) */}
+      {/* HOMEOWNER LISTING MODAL */}
+      {/* ====================================================================== */}
+      <HomeownerListingModal
+        isOpen={isListingModalOpen}
+        onClose={() => setIsListingModalOpen(false)}
+        homeChargers={homeChargers}
+        onRefresh={refreshAllData}
+      />
+
+      {/* ====================================================================== */}
+      {/* HOMEOWNER BOOKING REQUEST MODAL */}
+      {/* ====================================================================== */}
+      <HomeownerBookingModal
+        isOpen={Boolean(selectedBookingHomeCharger)}
+        onClose={() => setSelectedBookingHomeCharger(null)}
+        charger={selectedBookingHomeCharger}
+        onBookingSuccess={() => refreshAllData()}
+      />
+
+      {/* ====================================================================== */}
+      {/* MODAL 1: STATUS REPORT MODAL */}
       {/* ====================================================================== */}
       {reportModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
@@ -642,7 +852,6 @@ export default function App() {
             </div>
             <p className="text-xs text-gray-400 mb-3">{reportModal.title}</p>
 
-            {/* Local-only Phase 1 notice */}
             <div className="bg-emerald-950/40 border border-emerald-500/20 p-2.5 rounded-xl text-xs text-emerald-300 mb-4 flex items-start gap-2">
               <Info className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <div>
@@ -651,21 +860,16 @@ export default function App() {
               </div>
             </div>
 
-            {/* Throttle Alert if currently throttled */}
             {reportThrottleState.isThrottled && (
               <div className="bg-amber-950/40 border border-amber-500/30 p-2.5 rounded-xl text-xs text-amber-300 mb-4 flex items-start gap-2">
                 <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div>
                   <span className="font-bold">Cooldown active: </span>
                   You recently reported this charger. Please wait <span className="font-bold underline">{reportThrottleState.remainingMinutes} min ({reportThrottleState.remainingSeconds}s)</span> before submitting another update.
-                  <p className="text-[10px] text-amber-400/80 mt-1">
-                    *Client-side convenience limit on this browser. Not intended as strict server abuse prevention.
-                  </p>
                 </div>
               </div>
             )}
 
-            {/* Feedback message banner */}
             {reportFeedbackMsg && (
               <div className={`p-3 rounded-xl text-xs mb-4 flex items-start gap-2 ${reportFeedbackMsg.type === 'error' ? 'bg-red-950/50 border border-red-500/40 text-red-300' : 'bg-emerald-950/50 border border-emerald-500/40 text-emerald-300'}`}>
                 {reportFeedbackMsg.type === 'error' ? <AlertTriangle className="w-4 h-4 shrink-0" /> : <CheckCircle2 className="w-4 h-4 shrink-0" />}
@@ -760,7 +964,7 @@ export default function App() {
       )}
 
       {/* ====================================================================== */}
-      {/* MODAL 2: REVIEWS & RATINGS MODAL (1-5 Stars + Comments + List) */}
+      {/* MODAL 2: REVIEWS & RATINGS MODAL */}
       {/* ====================================================================== */}
       {reviewsModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
@@ -780,7 +984,6 @@ export default function App() {
             </div>
             <p className="text-xs text-gray-400 mb-4 truncate">{reviewsModal.title}</p>
 
-            {/* Average rating summary banner */}
             <div className="bg-gray-950/80 border border-gray-800 rounded-xl p-3 mb-4 flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-1.5">
@@ -808,10 +1011,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Scrollable area: Review submission form & existing reviews list */}
             <div className="flex-1 overflow-y-auto custom-scrollbar space-y-4 pr-1">
-              
-              {/* Add review form */}
               <div className="bg-gray-950/60 border border-gray-800 rounded-xl p-3.5">
                 <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider mb-2">Write a Review</h4>
                 
@@ -827,7 +1027,6 @@ export default function App() {
                 )}
 
                 <form onSubmit={submitReviewHandler} className="space-y-3">
-                  {/* Star rating selector */}
                   <div>
                     <label className="text-[11px] font-semibold text-gray-400 block mb-1">Your Rating</label>
                     <div className="flex items-center gap-1.5">
@@ -845,7 +1044,7 @@ export default function App() {
                         </button>
                       ))}
                       <span className="text-xs font-bold text-amber-400 ml-2">
-                        {reviewRating === 5 ? '5 Stars - Excellent' : reviewRating === 4 ? '4 Stars - Good' : reviewRating === 3 ? '3 Stars - Average' : reviewRating === 2 ? '2 Stars - Poor' : '1 Star - Terrible'}
+                        {reviewRating} Stars
                       </span>
                     </div>
                   </div>
@@ -877,13 +1076,9 @@ export default function App() {
                       Post Review
                     </button>
                   </div>
-                  <p className="text-[10px] text-gray-500">
-                    Phase 1: Reviews are stored locally in this browser and are not shared with other users.
-                  </p>
                 </form>
               </div>
 
-              {/* Existing Reviews List */}
               <div>
                 <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Saved Reviews ({currentStationReviews.length})</h4>
                 {currentStationReviews.length === 0 ? (
@@ -920,7 +1115,7 @@ export default function App() {
       )}
 
       {/* ====================================================================== */}
-      {/* MODAL 3: GENERAL FEEDBACK MODAL (Bugs, Missing Chargers, Suggestions) */}
+      {/* MODAL 3: GENERAL FEEDBACK MODAL */}
       {/* ====================================================================== */}
       {feedbackModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
@@ -940,7 +1135,6 @@ export default function App() {
             </div>
             <p className="text-xs text-gray-400 mb-3">Help us improve the Electrify Mobility experience</p>
 
-            {/* Clear Phase 1 local storage notice */}
             <div className="bg-emerald-950/40 border border-emerald-500/20 p-2.5 rounded-xl text-xs text-emerald-300 mb-4 flex items-start gap-2">
               <Info className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <div>
@@ -1032,7 +1226,6 @@ export default function App() {
               </button>
             </form>
 
-            {/* Toggle to inspect locally saved feedback */}
             <div className="mt-4 pt-3 border-t border-gray-800 text-center">
               <button
                 type="button"
@@ -1065,7 +1258,7 @@ export default function App() {
       )}
 
       {/* ====================================================================== */}
-      {/* MODAL 4: BOOKING / RESERVATION MODAL */}
+      {/* MODAL 4: PUBLIC BOOKING / RESERVATION MODAL */}
       {/* ====================================================================== */}
       {bookingModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
@@ -1078,7 +1271,7 @@ export default function App() {
             >
               <X className="w-5 h-5" />
             </button>
-            <h3 className="font-bold text-lg text-gray-100 mb-1">Reserve Slot</h3>
+            <h3 className="font-bold text-lg text-gray-100 mb-1">Reserve Public Slot</h3>
             <p className="text-xs text-gray-400 mb-4">{bookingModal.title}</p>
             
             <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Select Time Slot</label>

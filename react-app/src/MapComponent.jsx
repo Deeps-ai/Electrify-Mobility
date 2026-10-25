@@ -165,6 +165,34 @@ const getStationIcon = (status, isFast) => {
 };
 
 /**
+ * Returns a memoized L.divIcon instance specifically for rentable private homeowner chargers.
+ * Uses a purple/violet palette with a distinctive home icon glyph and accessible labeling.
+ * @returns {L.DivIcon}
+ */
+const getHomeownerIcon = () => {
+  let cached = iconCache.get('homeowner_charger');
+  if (!cached) {
+    cached = L.divIcon({
+      className: '',
+      iconSize: [34, 34],
+      iconAnchor: [17, 34],
+      popupAnchor: [0, -34],
+      html: `
+        <div 
+          role="img" 
+          aria-label="Private Homeowner EV Charger available for rent" 
+          title="Private Homeowner EV Charger available for rent"
+          style="width:34px; height:34px; border-radius:50%; border:2px solid #ffffff; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 15px -3px rgba(124,58,237,0.6); background-color: #7c3aed; color:#ffffff;"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+        </div>`
+    });
+    iconCache.set('homeowner_charger', cached);
+  }
+  return cached;
+};
+
+/**
  * Map controller handling camera view, responsive resize observation, persistent user location marker, and routing control.
  */
 function MapController({ focusedStation, activeRoute, userLocation, onRouteError }) {
@@ -356,6 +384,7 @@ function MapController({ focusedStation, activeRoute, userLocation, onRouteError
  * @property {(station: Station) => void} onRoute - Callback triggered when requesting route to a station
  * @property {((station: Station) => void)|null} [onReport] - Optional callback triggered to report station status
  * @property {((station: Station) => void)|null} [onOpenReviews] - Optional callback to view and submit reviews
+ * @property {((station: Station) => void)|null} [onRequestBooking] - Optional callback to request booking for homeowner chargers
  * @property {Record<string|number, StationReport>} [reportsByStation] - Station status reports indexed by station id
  * @property {Record<string|number, { averageRating: number|null, reviewCount: number }>} [ratingsByStation] - Station rating stats
  * @property {((error: Error | unknown) => void)} [onRouteError] - Optional callback when routing fails
@@ -374,6 +403,7 @@ export default function MapComponent({
   onRoute, 
   onReport, 
   onOpenReviews,
+  onRequestBooking,
   reportsByStation = {},
   ratingsByStation = {},
   onRouteError
@@ -419,6 +449,106 @@ export default function MapComponent({
     return stations
       .filter(st => st && isValidCoordinate(st.lat, st.lng))
       .map(st => {
+        // HOMEOWNER CHARGER MARKER & POPUP
+        if (st.is_homeowner) {
+          const ratingStats = ratingsByStation?.[st.id];
+          const displayAddress = st.is_address_public 
+            ? (st.exact_address || st.address || 'Address provided by host') 
+            : (st.approx_address || `${st.region || 'NCR'} (Approximate Area)`);
+
+          return (
+            <Marker
+              key={st.id}
+              position={[Number(st.lat), Number(st.lng)]}
+              icon={getHomeownerIcon()}
+            >
+              <Popup maxWidth={280} autoPan={true} autoPanPadding={[12, 12]}>
+                <div className="font-sans min-w-[220px] max-w-[260px]">
+                  <div className="flex justify-between items-center mb-1 gap-2">
+                    <span className="text-[10px] bg-purple-100 text-purple-900 font-extrabold px-2 py-0.5 rounded flex items-center gap-1">
+                      🏠 Rentable Home Charger
+                    </span>
+                    <span className="text-xs font-black text-purple-700 shrink-0">{st.price || 'Fair Rate'}</span>
+                  </div>
+
+                  <div className="text-[11px] text-gray-700 font-medium mb-1.5">
+                    Host: <span className="font-bold text-gray-900">{st.owner_name || 'Verified Host'}</span>
+                  </div>
+
+                  <div className="bg-purple-50/90 border border-purple-200/90 rounded-lg p-2 text-[11px] mb-2 space-y-1">
+                    <div className="flex items-center justify-between text-gray-700">
+                      <span className="font-semibold text-gray-600">⚡ Power:</span>
+                      <span className="font-bold text-purple-900">{st.power_kw || '3.3'} kW AC</span>
+                    </div>
+                    <div className="flex items-center justify-between text-gray-700">
+                      <span className="font-semibold text-gray-600">🔌 Connector:</span>
+                      <span className="text-gray-900 font-medium truncate max-w-[130px]">{st.connector || 'Type 2 AC'}</span>
+                    </div>
+                    {st.schedule && (
+                      <div className="flex items-center justify-between text-gray-700">
+                        <span className="font-semibold text-gray-600">🕒 Schedule:</span>
+                        <span className="text-[10px] text-gray-600 truncate max-w-[130px]">{st.schedule}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <h4 className="font-bold text-gray-900 text-sm leading-snug">{st.title}</h4>
+                  <p className="text-xs text-gray-600 mt-0.5 leading-tight flex items-start gap-1">
+                    <span className="shrink-0">📍</span>
+                    <span>{displayAddress}</span>
+                  </p>
+
+                  {!st.is_address_public && (
+                    <p className="text-[10px] text-purple-700 font-medium mt-1 bg-purple-50 p-1 rounded border border-purple-200/60 leading-tight">
+                      🔒 Approximate location shown for host privacy. Exact address & parking details revealed upon booking confirmation.
+                    </p>
+                  )}
+
+                  {st.access_instructions && (
+                    <p className="text-[10px] text-gray-600 bg-gray-50 border border-gray-200 rounded p-1 mt-1.5 italic leading-tight">
+                      <span className="font-semibold text-gray-700">Access:</span> {st.access_instructions}
+                    </p>
+                  )}
+
+                  {/* Reviews summary */}
+                  <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between">
+                    <button 
+                      type="button"
+                      onClick={() => onOpenReviews?.(st)}
+                      className="text-[11px] font-bold text-purple-700 hover:text-purple-900 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>⭐ {ratingStats?.averageRating ? `${ratingStats.averageRating} (${ratingStats.reviewCount})` : 'No reviews'}</span>
+                      <span className="text-[10px] font-normal text-gray-500">· Reviews</span>
+                    </button>
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                      ✓ Verified Listing
+                    </span>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex gap-1.5 mt-2.5">
+                    <button 
+                      type="button"
+                      onClick={() => onRequestBooking?.(st)} 
+                      className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-2.5 py-2 text-xs rounded-lg transition flex-1 cursor-pointer min-h-[40px] flex items-center justify-center shadow-sm"
+                    >
+                      Request Booking
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => onRoute?.(st)} 
+                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-2.5 py-2 text-xs rounded-lg transition flex-1 cursor-pointer min-h-[40px] flex items-center justify-center"
+                    >
+                      Route
+                    </button>
+                  </div>
+                </div>
+              </Popup>
+            </Marker>
+          );
+        }
+
+        // PUBLIC CHARGING STATION MARKER & POPUP
         const report = reportsByStation?.[st.id];
         const status = report?.status;
         const statusText = status === 'working' ? 'Working' : status === 'broken' ? 'Broken' : status === 'occupied' ? 'Occupied' : null;
@@ -534,7 +664,7 @@ export default function MapComponent({
           </Marker>
         );
       });
-  }, [stations, reportsByStation, ratingsByStation, onReserve, onRoute, onReport, onOpenReviews]);
+  }, [stations, reportsByStation, ratingsByStation, onReserve, onRoute, onReport, onOpenReviews, onRequestBooking]);
 
   return (
     <div className="h-full w-full relative min-h-[250px] md:min-h-0">
@@ -570,13 +700,14 @@ export default function MapComponent({
       <div 
         role="region"
         aria-label="Map Marker Color Legend"
-        className="absolute bottom-2 left-2 z-[1000] bg-gray-900/90 border border-gray-700/80 rounded-xl px-2.5 py-1.5 text-[10px] text-gray-300 shadow-lg backdrop-blur-md hidden sm:flex items-center gap-2.5 pointer-events-auto"
+        className="absolute bottom-2 left-2 z-[1000] bg-gray-900/95 border border-gray-700/80 rounded-xl px-2.5 py-1.5 text-[10px] text-gray-300 shadow-lg backdrop-blur-md hidden sm:flex items-center gap-2.5 pointer-events-auto flex-wrap max-w-[85vw]"
       >
         <span className="font-bold text-gray-200">Legend:</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block border border-gray-950"></span> Working (✓)</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block border border-gray-950"></span> Occupied (⏱)</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block border border-gray-950"></span> Broken (✕)</span>
-        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block border border-gray-950"></span> Default (Speed)</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block border border-gray-950"></span> Public (Speed)</span>
+        <span className="flex items-center gap-1 border-l border-gray-700 pl-2"><span className="w-2.5 h-2.5 rounded-full bg-purple-600 inline-block border border-gray-950"></span> 🏠 Home Charger (Rentable)</span>
       </div>
 
       {/* Non-blocking inline routing error toast */}
