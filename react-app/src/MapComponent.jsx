@@ -1,97 +1,470 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet-routing-machine/dist/leaflet-routing-machine.css';
 import 'leaflet-routing-machine';
 
-const MAP_CENTER = [28.6139, 77.2090];
-const MAP_ZOOM = 11;
-const TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
-const createIcon = (isFast) => L.divIcon({
-  className: '',
-  iconSize: [32, 32],
-  iconAnchor: [16, 32],
-  html: `
-    <div style="width:32px; height:32px; border-radius:50%; border:2px solid #030712; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 15px -3px rgba(0,0,0,0.5); background-color: ${isFast ? '#10b981' : '#3b82f6'}; color:#030712;">
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="${isFast ? '13 2 3 14 12 14 11 22 21 10 12 10 13 2' : '6 2 18 2 18 7 14 7 14 11 14 22 10 22 10 11 6 11 6 7 6 2' }"></polygon></svg>
-    </div>`
+// Fix Leaflet default marker icon resolution for production bundlers
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: markerIcon2x,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
 });
 
-// Component to handle map view updates
-function MapController({ focusedStation, activeRoute, userLocation }) {
-  const map = useMap();
-  const [routingControl, setRoutingControl] = useState(null);
+const MAP_CENTER = [28.6139, 77.2090];
+const MAP_ZOOM = 11;
+const TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
-  // Focus station
+// Configurable OSRM service URL with public demo server as fallback
+const OSRM_SERVICE_URL = import.meta.env.VITE_OSRM_URL || 'https://router.project-osrm.org/route/v1';
+
+/**
+ * Validates geographical coordinates (latitude [-90, 90], longitude [-180, 180]).
+ * @param {unknown} lat
+ * @param {unknown} lng
+ * @returns {boolean}
+ */
+const isValidCoordinate = (lat, lng) => {
+  if (lat === null || lat === undefined || lng === null || lng === undefined) return false;
+  if (typeof lat === 'boolean' || typeof lng === 'boolean') return false;
+  const numLat = Number(lat);
+  const numLng = Number(lng);
+  return (
+    !Number.isNaN(numLat) &&
+    !Number.isNaN(numLng) &&
+    numLat >= -90 &&
+    numLat <= 90 &&
+    numLng >= -180 &&
+    numLng <= 180
+  );
+};
+
+/**
+ * Validates whether location is a valid [lat, lng] array.
+ * @param {unknown} loc
+ * @returns {boolean}
+ */
+const isValidLatLngTuple = (loc) => {
+  return Array.isArray(loc) && loc.length >= 2 && isValidCoordinate(loc[0], loc[1]);
+};
+
+const getMarkerColor = (status, isFast) => {
+  if (status === 'working') return '#10b981'; // green
+  if (status === 'broken') return '#ef4444'; // red
+  if (status === 'occupied') return '#f59e0b'; // amber
+  return isFast ? '#10b981' : '#3b82f6'; // default by charger type
+};
+
+// Module-level icon cache to prevent recreating L.divIcon on every render
+const iconCache = new Map();
+
+/**
+ * Returns a memoized L.divIcon instance based on status and charger speed.
+ * @param {string|null|undefined} status
+ * @param {boolean} isFast
+ * @returns {L.DivIcon}
+ */
+const getStationIcon = (status, isFast) => {
+  const normalizedStatus = (status === 'working' || status === 'broken' || status === 'occupied')
+    ? status
+    : 'none';
+  const speedKey = isFast ? 'fast' : 'normal';
+  const cacheKey = `${normalizedStatus}_${speedKey}`;
+
+  let cached = iconCache.get(cacheKey);
+  if (!cached) {
+    const color = getMarkerColor(status, isFast);
+    const svgPoints = isFast
+      ? '13 2 3 14 12 14 11 22 21 10 12 10 13 2'
+      : '6 2 18 2 18 7 14 7 14 11 14 22 10 22 10 11 6 11 6 7 6 2';
+
+    cached = L.divIcon({
+      className: '',
+      iconSize: [32, 32],
+      iconAnchor: [16, 32],
+      html: `
+        <div style="width:32px; height:32px; border-radius:50%; border:2px solid #030712; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 15px -3px rgba(0,0,0,0.5); background-color: ${color}; color:#030712;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="${svgPoints}"></polygon></svg>
+        </div>`
+    });
+    iconCache.set(cacheKey, cached);
+  }
+
+  return cached;
+};
+
+/**
+ * Map controller handling camera view, responsive resize observation, persistent user location marker, and routing control.
+ */
+function MapController({ focusedStation, activeRoute, userLocation, onRouteError }) {
+  const map = useMap();
+  const routingControlRef = useRef(null);
+  const userMarkerRef = useRef(null);
+  const lastFlyToPosRef = useRef(null);
+  const onRouteErrorRef = useRef(onRouteError);
+
   useEffect(() => {
-    if (focusedStation) {
-      map.flyTo([focusedStation.lat, focusedStation.lng], 15, { duration: 1.2 });
+    onRouteErrorRef.current = onRouteError;
+  }, [onRouteError]);
+
+  // ResizeObserver: invalidate map size whenever container changes or rotates so tiles never render blank
+  useEffect(() => {
+    const container = map.getContainer();
+    if (!container) return;
+
+    map.invalidateSize();
+
+    const resizeObserver = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [map]);
+
+  // Focus station on map
+  useEffect(() => {
+    if (focusedStation && isValidCoordinate(focusedStation.lat, focusedStation.lng)) {
+      map.flyTo([Number(focusedStation.lat), Number(focusedStation.lng)], 15, { duration: 1.2 });
     }
   }, [focusedStation, map]);
 
-  // Locate user
+  // User location marker and flyTo handling: create marker once, move with setLatLng, flyTo only on meaningful change
   useEffect(() => {
-    if (userLocation) {
-      map.flyTo(userLocation, 14);
-      L.circleMarker(userLocation, { radius: 8, fillColor: '#3b82f6', color: '#ffffff', weight: 2, fillOpacity: 1 }).addTo(map);
+    if (!isValidLatLngTuple(userLocation)) {
+      return;
+    }
+
+    const currentLatLng = L.latLng(Number(userLocation[0]), Number(userLocation[1]));
+
+    // Update existing marker position or create once
+    if (userMarkerRef.current) {
+      userMarkerRef.current.setLatLng(currentLatLng);
+    } else {
+      userMarkerRef.current = L.circleMarker(currentLatLng, {
+        radius: 8,
+        fillColor: '#3b82f6',
+        color: '#ffffff',
+        weight: 2,
+        fillOpacity: 1
+      }).addTo(map);
+    }
+
+    // flyTo only on first fix or when moved more than 50 meters
+    if (!lastFlyToPosRef.current) {
+      map.flyTo(currentLatLng, 14);
+      lastFlyToPosRef.current = currentLatLng;
+    } else {
+      const distance = lastFlyToPosRef.current.distanceTo(currentLatLng);
+      if (distance > 50) {
+        map.flyTo(currentLatLng, 14);
+        lastFlyToPosRef.current = currentLatLng;
+      }
     }
   }, [userLocation, map]);
 
-  // Routing with custom cleaner UI
+  // Clean up user location marker only on unmount
   useEffect(() => {
-    if (activeRoute) {
-      if (routingControl) map.removeControl(routingControl);
-      
-      const startPoint = userLocation ? L.latLng(userLocation[0], userLocation[1]) : L.latLng(MAP_CENTER[0], MAP_CENTER[1]);
-      const endPoint = L.latLng(activeRoute.lat, activeRoute.lng);
-      
-      const control = L.Routing.control({
-        waypoints: [startPoint, endPoint],
-        routeWhileDragging: false,
-        showAlternatives: false,
-        fitSelectedRoutes: true,
-        // Override the default ugly routing box by hiding it in CSS or custom formatter
-        createMarker: function() { return null; }, // hide default waypoints
-        lineOptions: {
-          styles: [{ color: '#3b82f6', weight: 6, opacity: 0.8 }]
+    return () => {
+      if (userMarkerRef.current) {
+        try {
+          map.removeLayer(userMarkerRef.current);
+        } catch {
+          // Safe ignore on unmount
         }
-      }).addTo(map);
+        userMarkerRef.current = null;
+      }
+    };
+  }, [map]);
 
-      // We apply custom CSS in index.css to make the routing box look beautiful
-      setRoutingControl(control);
+  // Helper to create routing control
+  const createRoutingControl = useCallback((startLatLng, endLatLng) => {
+    const isDesktop = typeof window !== 'undefined' ? window.innerWidth >= 768 : true;
+    const control = L.Routing.control({
+      router: L.Routing.osrmv1({
+        serviceUrl: OSRM_SERVICE_URL,
+      }),
+      waypoints: [startLatLng, endLatLng],
+      routeWhileDragging: false,
+      showAlternatives: false,
+      fitSelectedRoutes: true,
+      show: isDesktop, // Collapse routing panel on screens under 768px so it does not cover the map
+      createMarker: () => null,
+      lineOptions: {
+        styles: [{ color: '#3b82f6', weight: 6, opacity: 0.8 }]
+      }
+    });
+
+    control.on('routingerror', (err) => {
+      onRouteErrorRef.current?.(err);
+    });
+
+    control.addTo(map);
+    return control;
+  }, [map]);
+
+  // Routing: reacts to both activeRoute and userLocation, with fallback to Delhi center if userLocation is absent
+  useEffect(() => {
+    if (!activeRoute) {
+      if (routingControlRef.current) {
+        try {
+          map.removeControl(routingControlRef.current);
+        } catch {
+          // Safe ignore
+        }
+        routingControlRef.current = null;
+      }
+      return;
     }
-    // eslint-disable-next-line
-  }, [activeRoute, map]);
+
+    if (!isValidCoordinate(activeRoute.lat, activeRoute.lng)) {
+      return;
+    }
+
+    const startPoint = isValidLatLngTuple(userLocation)
+      ? L.latLng(Number(userLocation[0]), Number(userLocation[1]))
+      : L.latLng(MAP_CENTER[0], MAP_CENTER[1]);
+
+    const endPoint = L.latLng(Number(activeRoute.lat), Number(activeRoute.lng));
+
+    if (routingControlRef.current) {
+      // Update waypoints without destroying and recreating the control
+      routingControlRef.current.setWaypoints([startPoint, endPoint]);
+    } else {
+      routingControlRef.current = createRoutingControl(startPoint, endPoint);
+    }
+  }, [activeRoute, userLocation, map, createRoutingControl]);
+
+  // Always clean up routing control on unmount
+  useEffect(() => {
+    return () => {
+      if (routingControlRef.current) {
+        try {
+          map.removeControl(routingControlRef.current);
+        } catch {
+          // Safe ignore
+        }
+        routingControlRef.current = null;
+      }
+    };
+  }, [map]);
 
   return null;
 }
 
-export default function MapComponent({ stations, focusedStation, activeRoute, userLocation, onReserve, onRoute }) {
-  return (
-    <div className="h-full w-full relative">
-      <MapContainer center={MAP_CENTER} zoom={MAP_ZOOM} style={{ height: '100%', width: '100%', zIndex: 10 }} zoomControl={false}>
-        <TileLayer url={TILE_URL} attribution="&copy; Esri" />
-        
-        {stations.map(st => (
-          <Marker key={st.id} position={[st.lat, st.lng]} icon={createIcon(st.type === 'DC_FAST')}>
-            <Popup>
-              <div className="font-sans min-w-[200px]">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded">{st.operator}</span>
+/**
+ * @typedef {Object} Station
+ * @property {string|number} id - Unique identifier for the station
+ * @property {number|string} lat - Latitude coordinate
+ * @property {number|string} lng - Longitude coordinate
+ * @property {string} [title] - Station title/name
+ * @property {string} [address] - Station physical address
+ * @property {string} [operator] - Charging network operator name
+ * @property {string} [price] - Charging price display string
+ * @property {string} [type] - Charger type (e.g. 'DC_FAST' or 'AC_SLOW')
+ */
+
+/**
+ * @typedef {Object} StationReport
+ * @property {'working'|'broken'|'occupied'|string} [status] - Current operational status
+ * @property {number|string} [minutesAgo] - Minutes elapsed since status report
+ * @property {number} [wait_minutes] - Estimated wait time in minutes
+ */
+
+/**
+ * @typedef {Object} MapComponentProps
+ * @property {Station[]} stations - Array of station objects
+ * @property {Station|null} [focusedStation] - Currently focused station
+ * @property {Station|null} [activeRoute] - Target station for routing
+ * @property {[number, number]|null} [userLocation] - Current user coordinates [lat, lng]
+ * @property {(station: Station) => void} onReserve - Callback triggered when reserving a station
+ * @property {(station: Station) => void} onRoute - Callback triggered when requesting route to a station
+ * @property {((station: Station) => void)|null} [onReport] - Optional callback triggered to report station status
+ * @property {Record<string|number, StationReport>} [reportsByStation] - Station status reports indexed by station id
+ * @property {((error: Error | unknown) => void)} [onRouteError] - Optional callback when routing fails
+ */
+
+/**
+ * Interactive Leaflet Map component displaying charging stations, user location, and turn-by-turn routes.
+ * @param {MapComponentProps} props
+ */
+export default function MapComponent({ 
+  stations, 
+  focusedStation, 
+  activeRoute, 
+  userLocation, 
+  onReserve, 
+  onRoute, 
+  onReport, 
+  reportsByStation = {},
+  onRouteError
+}) {
+  const [routeErrorToast, setRouteErrorToast] = useState(null);
+  const [prevActiveRoute, setPrevActiveRoute] = useState(activeRoute);
+
+  // Reset error toast when activeRoute changes
+  if (activeRoute !== prevActiveRoute) {
+    setPrevActiveRoute(activeRoute);
+    if (routeErrorToast) {
+      setRouteErrorToast(null);
+    }
+  }
+
+  // Auto-dismiss routing error toast after 5 seconds
+  useEffect(() => {
+    if (routeErrorToast) {
+      const timer = setTimeout(() => {
+        setRouteErrorToast(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [routeErrorToast]);
+
+  const handleRouteError = useCallback((err) => {
+    const message = err?.error?.message || err?.message || 'Unable to calculate route. Please try again later.';
+    setRouteErrorToast(message);
+    if (typeof onRouteError === 'function') {
+      onRouteError(err || new Error(message));
+    }
+  }, [onRouteError]);
+
+  // Memoize station markers keyed on stations and reportsByStation
+  const stationMarkers = useMemo(() => {
+    if (!Array.isArray(stations)) {
+      return null;
+    }
+
+    return stations
+      .filter(st => st && isValidCoordinate(st.lat, st.lng))
+      .map(st => {
+        const report = reportsByStation?.[st.id];
+        const status = report?.status;
+        const statusText = status === 'working' ? 'Working' : status === 'broken' ? 'Broken' : status === 'occupied' ? 'Occupied' : null;
+        const statusColor = status === 'working' ? 'bg-emerald-100 text-emerald-800' : status === 'broken' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
+
+        // Fallbacks for missing fields
+        const operator = st.operator || 'N/A';
+        const price = st.price || 'N/A';
+        const title = st.title || 'N/A';
+        const address = st.address || 'N/A';
+
+        // Guard report.minutesAgo
+        const minutesAgoText = (report?.minutesAgo !== undefined && report?.minutesAgo !== null && report?.minutesAgo !== '')
+          ? `${report.minutesAgo} min ago`
+          : 'recently';
+
+        return (
+          <Marker 
+            key={st.id} 
+            position={[Number(st.lat), Number(st.lng)]} 
+            icon={getStationIcon(status, st.type === 'DC_FAST')}
+          >
+            <Popup maxWidth={260} autoPan={true} autoPanPadding={[12, 12]}>
+              <div className="font-sans min-w-[210px] max-w-[240px]">
+                <div className="flex justify-between items-center mb-1 gap-2">
+                  <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded truncate max-w-[120px]">{operator}</span>
+                  <span className="text-xs font-bold text-emerald-700 shrink-0">{price}</span>
                 </div>
-                <h4 className="font-bold text-gray-100 text-sm mt-1">{st.title}</h4>
-                <div className="flex gap-2 mt-3">
-                  <button onClick={() => onReserve(st)} className="bg-emerald-500 text-gray-950 font-bold px-3 py-1.5 text-xs rounded-lg hover:bg-emerald-400 transition w-full">Reserve</button>
-                  <button onClick={() => onRoute(st)} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-3 py-1.5 text-xs rounded-lg transition w-full">Route</button>
+
+                {statusText ? (
+                  <div className="my-1.5 flex items-center justify-between text-[11px] bg-gray-100 p-1.5 rounded-lg border border-gray-200">
+                    <span className={`px-1.5 py-0.5 rounded font-extrabold text-[10px] uppercase ${statusColor}`}>
+                      {statusText}
+                    </span>
+                    <span className="text-gray-500 text-[10px]">
+                      Updated {minutesAgoText}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="my-1 text-[10px] text-gray-400 italic">
+                    No status reports in last 2 hrs
+                  </div>
+                )}
+
+                <h4 className="font-bold text-gray-900 text-sm mt-1 leading-snug">{title}</h4>
+                <p className="text-xs text-gray-600 mt-0.5 leading-tight line-clamp-2">{address}</p>
+                
+                <div className="flex gap-1.5 mt-3">
+                  <button 
+                    type="button"
+                    onClick={() => onReserve?.(st)} 
+                    className="bg-emerald-500 text-gray-950 font-bold px-2.5 py-2 text-xs rounded-lg hover:bg-emerald-400 transition flex-1 cursor-pointer min-h-[40px] flex items-center justify-center"
+                  >
+                    Reserve
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => onRoute?.(st)} 
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-2.5 py-2 text-xs rounded-lg transition flex-1 cursor-pointer min-h-[40px] flex items-center justify-center"
+                  >
+                    Route
+                  </button>
+                  {onReport && (
+                    <button 
+                      type="button"
+                      onClick={() => onReport(st)} 
+                      className="bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold px-2 py-2 text-xs rounded-lg transition border border-gray-300 cursor-pointer min-h-[40px] flex items-center justify-center"
+                    >
+                      Report
+                    </button>
+                  )}
                 </div>
               </div>
             </Popup>
           </Marker>
-        ))}
+        );
+      });
+  }, [stations, reportsByStation, onReserve, onRoute, onReport]);
 
-        <MapController focusedStation={focusedStation} activeRoute={activeRoute} userLocation={userLocation} />
+  return (
+    <div className="h-full w-full relative min-h-[250px] md:min-h-0">
+      {/* Non-blocking inline routing error toast */}
+      {routeErrorToast && (
+        <div 
+          role="alert"
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-gray-900/95 border border-red-500/50 text-white text-xs px-3.5 py-2 rounded-lg shadow-xl flex items-center gap-2 backdrop-blur-sm pointer-events-auto max-w-[90vw]"
+        >
+          <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+          <span className="truncate">{routeErrorToast}</span>
+          <button 
+            type="button" 
+            onClick={() => setRouteErrorToast(null)} 
+            className="text-gray-400 hover:text-white font-bold ml-1 text-sm leading-none focus:outline-none cursor-pointer"
+            aria-label="Dismiss error"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
+      <MapContainer 
+        center={MAP_CENTER} 
+        zoom={MAP_ZOOM} 
+        style={{ height: '100%', width: '100%', zIndex: 10 }} 
+        zoomControl={false}
+        touchZoom={true}
+        dragging={true}
+      >
+        <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} />
+        
+        {stationMarkers}
+
+        <MapController 
+          focusedStation={focusedStation} 
+          activeRoute={activeRoute} 
+          userLocation={userLocation} 
+          onRouteError={handleRouteError}
+        />
       </MapContainer>
     </div>
   );
