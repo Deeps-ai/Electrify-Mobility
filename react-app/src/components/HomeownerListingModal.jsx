@@ -12,7 +12,10 @@ import {
   Pause, 
   Play, 
   Edit3, 
-  Calendar
+  Calendar,
+  Globe,
+  Lock,
+  Info
 } from 'lucide-react';
 import { 
   addHomeCharger, 
@@ -46,6 +49,7 @@ export default function HomeownerListingModal({
   const [exactAddress, setExactAddress] = useState('');
   const [approxAddress, setApproxAddress] = useState('');
   const [isAddressPublic, setIsAddressPublic] = useState(false);
+  const [visibility, setVisibility] = useState('public'); // 'public' | 'private'
   const [connector, setConnector] = useState('Type 2 AC');
   const [powerKw, setPowerKw] = useState('7.4');
   const [priceNum, setPriceNum] = useState('14');
@@ -71,6 +75,7 @@ export default function HomeownerListingModal({
     setExactAddress('');
     setApproxAddress('');
     setIsAddressPublic(false);
+    setVisibility('public');
     setConnector('Type 2 AC');
     setPowerKw('7.4');
     setPriceNum('14');
@@ -90,6 +95,7 @@ export default function HomeownerListingModal({
     setExactAddress(charger.exact_address || '');
     setApproxAddress(charger.approx_address || '');
     setIsAddressPublic(Boolean(charger.is_address_public));
+    setVisibility(charger.visibility || 'public');
     setConnector(charger.connector || 'Type 2 AC');
     setPowerKw(String(charger.power_kw || '7.4'));
     setPriceNum(String(charger.price_num || '14'));
@@ -117,6 +123,7 @@ export default function HomeownerListingModal({
         exact_address: exactAddress,
         approx_address: approxAddress || `${region} (Approximate area)`,
         is_address_public: isAddressPublic,
+        visibility,
         connector,
         power_kw: Number(powerKw),
         price: formattedPrice,
@@ -149,6 +156,7 @@ export default function HomeownerListingModal({
       exact_address: exactAddress,
       approx_address: approxAddress || `${region} (Approximate area)`,
       is_address_public: isAddressPublic,
+      visibility,
       lat: coords.lat,
       lng: coords.lng,
       connector,
@@ -175,6 +183,12 @@ export default function HomeownerListingModal({
   const handleTogglePause = (charger) => {
     const nextStatus = charger.status === 'paused' ? 'approved' : 'paused';
     updateHomeCharger(charger.id, { status: nextStatus });
+    onRefresh?.();
+  };
+
+  const handleToggleVisibility = (charger) => {
+    const nextVis = charger.visibility === 'private' ? 'public' : 'private';
+    updateHomeCharger(charger.id, { visibility: nextVis });
     onRefresh?.();
   };
 
@@ -383,6 +397,51 @@ export default function HomeownerListingModal({
                 )}
               </div>
 
+              {/* Listing Visibility: Public vs Private */}
+              <div className="bg-gray-950/70 border border-gray-800 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
+                    {visibility === 'public' ? <Globe className="w-4 h-4 text-emerald-400" /> : <Lock className="w-4 h-4 text-purple-400" />}
+                    Listing Visibility
+                  </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${visibility === 'public' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-purple-500/10 text-purple-300 border-purple-500/30'}`}>
+                    {visibility === 'public' ? 'Public Discovery' : 'Private (Hidden)'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setVisibility('public')}
+                    className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${visibility === 'public' ? 'bg-emerald-950/50 border-emerald-500/60 text-white shadow-sm' : 'bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-700'}`}
+                  >
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-emerald-400">
+                      <Globe className="w-3.5 h-3.5" /> Public Listing
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                      Once approved, visible on the regular map, search results, and SOS emergency finder.
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVisibility('private')}
+                    className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${visibility === 'private' ? 'bg-purple-950/50 border-purple-500/60 text-white shadow-sm' : 'bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-700'}`}
+                  >
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-purple-300">
+                      <Lock className="w-3.5 h-3.5" /> Private Listing
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                      Hidden from the home page, public map/search, and SOS results. Visible only in your dashboard.
+                    </p>
+                  </button>
+                </div>
+
+                <p className="text-[10px] text-gray-500 flex items-center gap-1">
+                  <Info className="w-3 h-3 text-purple-400 shrink-0" />
+                  <span>&ldquo;Private&rdquo; means hidden from public discovery. In this local prototype, access control is simulated without a shared backend.</span>
+                </p>
+              </div>
+
               {/* Specs: Connector, Power, Pricing */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
@@ -531,6 +590,13 @@ export default function HomeownerListingModal({
                           <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded border ${statusBadge.color}`}>
                             {statusBadge.label}
                           </span>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                            charger.visibility === 'private'
+                              ? 'bg-purple-950/70 text-purple-300 border-purple-700/80'
+                              : 'bg-emerald-950/70 text-emerald-300 border-emerald-700/80'
+                          }`}>
+                            {charger.visibility === 'private' ? '🔒 Private' : '🌐 Public'}
+                          </span>
                           <span className="text-[10px] text-purple-400 font-bold bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800/60">
                             {charger.price}
                           </span>
@@ -548,6 +614,15 @@ export default function HomeownerListingModal({
 
                       {/* Action buttons */}
                       <div className="flex items-center gap-1.5 shrink-0">
+                        {/* Visibility Toggle Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleVisibility(charger)}
+                          className="p-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition cursor-pointer"
+                          title={charger.visibility === 'private' ? 'Make listing Public (eligible for map & SOS)' : 'Make listing Private (hidden from public discovery)'}
+                        >
+                          {charger.visibility === 'private' ? <Globe className="w-3.5 h-3.5 text-emerald-400" /> : <Lock className="w-3.5 h-3.5 text-purple-400" />}
+                        </button>
                         {charger.status === 'approved' || charger.status === 'paused' ? (
                           <button
                             type="button"
@@ -576,6 +651,14 @@ export default function HomeownerListingModal({
                         </button>
                       </div>
                     </div>
+
+                    {/* Private listing explanation */}
+                    {charger.visibility === 'private' && (
+                      <div className="bg-purple-950/30 border border-purple-500/20 p-2 rounded-lg text-[11px] text-purple-300 flex items-center gap-1.5">
+                        <Lock className="w-3.5 h-3.5 shrink-0 text-purple-400" />
+                        <span><strong>Private Listing:</strong> Hidden from public map, search, and other drivers&apos; SOS results. Stored only in your private listings area.</span>
+                      </div>
+                    )}
 
                     {/* Status note if pending or declined */}
                     {charger.status === 'pending' && (

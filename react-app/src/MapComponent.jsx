@@ -498,6 +498,12 @@ export default function MapComponent({
                     <span>{displayAddress}</span>
                   </p>
 
+                  {st.distanceText && (
+                    <div className="mt-1 text-[11px] font-extrabold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded border border-emerald-300 inline-flex items-center gap-1">
+                      <span>📍</span> {st.distanceText}
+                    </div>
+                  )}
+
                   {!st.is_address_public && (
                     <p className="text-[10px] text-purple-700 font-medium mt-1 bg-purple-50 p-1 rounded border border-purple-200/60 leading-tight">
                       🔒 Approximate location shown for host privacy. Exact address & parking details revealed upon booking confirmation.
@@ -618,6 +624,12 @@ export default function MapComponent({
 
                 <h4 className="font-bold text-gray-900 text-sm mt-1 leading-snug">{title}</h4>
                 <p className="text-xs text-gray-600 mt-0.5 leading-tight line-clamp-2">{address}</p>
+
+                {st.distanceText && (
+                  <div className="mt-1 text-[11px] font-extrabold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded border border-emerald-300 inline-flex items-center gap-1">
+                    <span>📍</span> {st.distanceText}
+                  </div>
+                )}
 
                 {/* Rating button / summary row */}
                 <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between">

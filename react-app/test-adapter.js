@@ -38,6 +38,13 @@ const {
   getChargerRequests,
   updateChargerRequestStatus,
   getAdminAuditLog,
+  calculateDistanceKm,
+  formatDistanceKm,
+  getAdminSession,
+  setAdminSession,
+  clearAdminSession,
+  determineComplaintRecipient,
+  resolveComplaintWithRouting,
 } = await import('./src/services/storageAdapter.js');
 
 console.log('--- Testing Storage Adapter (Phase 1) ---');
@@ -291,4 +298,134 @@ assert(Array.isArray(auditLogs) && auditLogs.length >= 3, 'Audit logs should tra
 assert(auditLogs.some(log => log.entity_type === 'home_charger'), 'Should log home charger moderation');
 console.log('✓ TEST 13 Passed: Admin audit trail recorded successfully.');
 
-console.log('\nALL 13 TESTS PASSED SUCCESSFULLY! 🚀');
+// TEST 14: Homeowner charger visibility (public vs private)
+// Create a private charger
+const privateListing = addHomeCharger({
+  title: 'Private Villa Charger - Vasant Kunj',
+  owner_name: 'Rohit Malhotra',
+  phone: '+91 98111 22334',
+  full_address: 'Villa 14, Pocket B, Vasant Kunj, New Delhi',
+  approx_address: 'Near Vasant Square Mall, Vasant Kunj',
+  is_address_public: false,
+  visibility: 'private',
+  connector_type: 'Type 2 AC',
+  power_kw: 7.4,
+  pricing_rate: 14,
+  pricing_unit: 'hour',
+  schedule: 'Mon-Fri 7 PM - 11 PM',
+  access_instructions: 'Gate code 4821',
+  latitude: 28.5280,
+  longitude: 77.1550,
+});
+
+assert.strictEqual(privateListing.success, true);
+assert.strictEqual(privateListing.charger.visibility, 'private');
+
+// Admin approves the listing
+adminSetListingStatus(privateListing.charger.id, 'approved', 'Verified meter & photos');
+
+// Verify it exists in all listings but is EXCLUDED from getApprovedHomeChargers()
+const allHomes = getHomeChargers('all');
+assert(allHomes.some(c => c.id === privateListing.charger.id), 'Private listing should be in all home chargers list');
+
+const approvedPublicHomes = getApprovedHomeChargers();
+assert(
+  !approvedPublicHomes.some(c => c.id === privateListing.charger.id),
+  'Private listing MUST NOT appear in approved public discovery or SOS results'
+);
+
+// Toggle visibility from private to public
+const toggledListing = updateHomeCharger(privateListing.charger.id, { visibility: 'public' });
+assert.strictEqual(toggledListing.success, true);
+assert.strictEqual(toggledListing.charger.visibility, 'public');
+
+const nowApprovedPublic = getApprovedHomeChargers();
+assert(
+  nowApprovedPublic.some(c => c.id === privateListing.charger.id),
+  'Public listing MUST appear in approved public discovery once visibility is public'
+);
+
+// Clean up
+deleteHomeCharger(privateListing.charger.id);
+console.log('✓ TEST 14 Passed: Homeowner public vs private visibility filtering strictly enforced.');
+
+// TEST 15: Distance calculation and formatting
+const cpLat = 28.6315;
+const cpLng = 77.2167;
+const cyberCityLat = 28.4950;
+const cyberCityLng = 77.0890;
+
+const distCpToCyberCity = calculateDistanceKm(cpLat, cpLng, cyberCityLat, cyberCityLng);
+assert(typeof distCpToCyberCity === 'number', 'calculateDistanceKm should return a number');
+assert(distCpToCyberCity >= 18 && distCpToCyberCity <= 22, `Expected distance ~19-20 km, got ${distCpToCyberCity}`);
+
+const distFormatted = formatDistanceKm(distCpToCyberCity);
+assert.strictEqual(distFormatted, `${Math.round(distCpToCyberCity)} km away`);
+
+assert.strictEqual(formatDistanceKm(0.4), '400 m away');
+assert.strictEqual(formatDistanceKm(4.2), '4.2 km away');
+assert.strictEqual(formatDistanceKm(50), '50 km away');
+assert.strictEqual(formatDistanceKm(null), null);
+assert.strictEqual(formatDistanceKm(undefined), null);
+assert.strictEqual(calculateDistanceKm(null, cpLng, cyberCityLat, cyberCityLng), null);
+assert.strictEqual(calculateDistanceKm(cpLat, cpLng, 'invalid', cyberCityLng), null);
+console.log('✓ TEST 15 Passed: Straight-line Haversine distance calculation and formatting verified.');
+
+// TEST 16: Prototype Admin Session
+const initialSession = getAdminSession();
+assert.strictEqual(initialSession, null, 'Initial session should be null');
+
+const newSession = setAdminSession({ username: 'Priya Sharma', role: 'Municipal Liaison Officer' });
+assert.strictEqual(newSession.username, 'Priya Sharma');
+assert.strictEqual(newSession.role, 'Municipal Liaison Officer');
+assert.strictEqual(newSession.is_prototype, true);
+
+const fetchedSession = getAdminSession();
+assert.strictEqual(fetchedSession.username, 'Priya Sharma');
+
+const clearedSession = clearAdminSession();
+assert.strictEqual(clearedSession, true);
+assert.strictEqual(getAdminSession(), null);
+console.log('✓ TEST 16 Passed: Prototype admin session management verified.');
+
+// TEST 17: Complaint routing and resolution staging
+// 1. Complaint on public charger in Gurugram (Station 201 -> GMDA)
+const publicComplaint = addComplaint({
+  category: 'station_damage',
+  subject: 'Screen smashed at Cyber City Hub',
+  description: 'Physical vandalization of display screen on Gun 1.',
+  target_id: '201',
+  complainant_name: 'Vikas Gupta',
+  contact: 'vikas@example.com',
+});
+assert.strictEqual(publicComplaint.success, true);
+
+const recipientPublic = determineComplaintRecipient(publicComplaint.complaint);
+assert(recipientPublic, 'Should determine recipient for public charger');
+assert.strictEqual(recipientPublic.authority_type, 'municipality');
+assert(
+  recipientPublic.recipient_name.includes('Gurugram Metropolitan Development Authority') ||
+  recipientPublic.recipient_name.includes('GMDA')
+);
+
+// 2. Resolve with routing staging (unconfigured delivery channel)
+const stagedResolution = resolveComplaintWithRouting(publicComplaint.complaint.id, {
+  admin_username: 'Priya Sharma',
+  admin_role: 'Operations Admin',
+  staged_message: 'Urgent: Hardware vandalism reported at Station 201.',
+  admin_notes: 'Forwarding to NDMC Electrical Engineering Division.',
+});
+
+assert.strictEqual(stagedResolution.success, true);
+assert.strictEqual(stagedResolution.complaint.resolution_status, 'resolved_delivery_pending');
+assert.strictEqual(stagedResolution.complaint.delivery_status, 'pending_dispatch');
+assert.strictEqual(stagedResolution.complaint.status, 'resolved');
+assert(stagedResolution.complaint.resolution_notes.includes('delivery pending'));
+assert(Array.isArray(stagedResolution.complaint.resolution_history) && stagedResolution.complaint.resolution_history.length > 0);
+
+// Verify audit log has the staged routing entry
+const finalLogs = getAdminAuditLog();
+assert(finalLogs.some(l => l.action === 'complaint_resolved_routing'), 'Audit log should record complaint resolution with routing');
+console.log('✓ TEST 17 Passed: Complaint routing recipient identification and staged dispatch verified.');
+
+console.log('\nALL 17 TESTS PASSED SUCCESSFULLY! 🚀');

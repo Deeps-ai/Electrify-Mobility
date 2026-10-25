@@ -4,6 +4,7 @@ import MapComponent from './MapComponent';
 import HomeownerListingModal from './components/HomeownerListingModal';
 import HomeownerBookingModal from './components/HomeownerBookingModal';
 import AdminPortal from './components/AdminPortal';
+import SOSPage from './components/SOSPage';
 import {
   getStations,
   getReportsByStation,
@@ -14,6 +15,8 @@ import {
   getLocalFeedbackList,
   getThrottleStatus,
   getHomeChargers,
+  calculateDistanceKm,
+  formatDistanceKm,
 } from './services/storageAdapter';
 import { 
   Search, 
@@ -31,8 +34,21 @@ import {
   AlertTriangle,
   Home,
   Shield,
-  Lock
+  Lock,
+  AlertCircle
 } from 'lucide-react';
+
+// Delhi NCR Area Landmark Presets for manual location fallback
+const NCR_LANDMARK_PRESETS = [
+  { name: 'Connaught Place (Central Delhi)', lat: 28.6315, lng: 77.2167 },
+  { name: 'Cyber City (Gurugram)', lat: 28.4950, lng: 77.0890 },
+  { name: 'Sector 18 / Atta Market (Noida)', lat: 28.5700, lng: 77.3200 },
+  { name: 'Indirapuram (Ghaziabad)', lat: 28.6410, lng: 77.3750 },
+  { name: 'Nehru Place (South Delhi)', lat: 28.5490, lng: 77.2530 },
+  { name: 'Dwarka Sector 21 (West Delhi)', lat: 28.5520, lng: 77.0580 },
+  { name: 'Golf Course Extension (Gurugram)', lat: 28.4020, lng: 77.0780 },
+  { name: 'Faridabad NIT (Faridabad)', lat: 28.3880, lng: 77.3050 },
+];
 
 /**
  * Formats ISO timestamp to human-readable relative time using a reactive `now` timestamp.
@@ -56,10 +72,11 @@ function formatRelativeTime(isoString, now) {
 }
 
 export default function App() {
-  // Navigation / View Mode: 'app' (Driver Map) vs 'admin' (Admin Portal as separate interface)
+  // Navigation / View Mode: 'app' (Driver Map) vs 'admin' (Admin Portal) vs 'sos' (Emergency SOS Finder)
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window !== 'undefined') {
-      return (window.location.hash === '#admin' || window.location.pathname.startsWith('/admin')) ? 'admin' : 'app';
+      if (window.location.hash === '#admin' || window.location.pathname.startsWith('/admin')) return 'admin';
+      if (window.location.hash === '#sos') return 'sos';
     }
     return 'app';
   });
@@ -70,10 +87,13 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [regionFilter, setRegionFilter] = useState('ALL');
+  const [sortBy, setSortBy] = useState('DEFAULT'); // 'DEFAULT' | 'DISTANCE'
   
   const [activeRoute, setActiveRoute] = useState(null);
   const [focusedStation, setFocusedStation] = useState(null);
   const [userLocation, setUserLocation] = useState(null);
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [locationNotice, setLocationNotice] = useState(null);
 
   // Reactive time and local storage states
   const [now, setNow] = useState(() => Date.now());
@@ -114,11 +134,13 @@ export default function App() {
   const [feedbackSuccess, setFeedbackSuccess] = useState(null);
   const [showFeedbackHistory, setShowFeedbackHistory] = useState(false);
 
-  // 1. Sync viewMode with URL hash (#admin)
+  // 1. Sync viewMode with URL hash (#admin and #sos)
   useEffect(() => {
     const handleHashChange = () => {
       if (window.location.hash === '#admin') {
         setViewMode('admin');
+      } else if (window.location.hash === '#sos') {
+        setViewMode('sos');
       } else {
         setViewMode('app');
       }
@@ -140,9 +162,16 @@ export default function App() {
     }
   };
 
+  const navigateToSOS = () => {
+    setViewMode('sos');
+    if (typeof window !== 'undefined') {
+      window.location.hash = '#sos';
+    }
+  };
+
   const navigateToApp = () => {
     setViewMode('app');
-    if (typeof window !== 'undefined' && window.location.hash === '#admin') {
+    if (typeof window !== 'undefined' && (window.location.hash === '#admin' || window.location.hash === '#sos')) {
       window.history.pushState(null, '', window.location.pathname);
     }
   };
@@ -190,16 +219,42 @@ export default function App() {
     };
   }, [refreshAllData]);
 
-  // 4. Combined discovery list: Public stations + Approved homeowner chargers
+  // 4. Combined discovery list: Public stations + Approved, PUBLIC homeowner chargers only
   const allChargers = useMemo(() => {
-    const approvedHomes = homeChargers.filter(c => c.status === 'approved');
-    return [...publicStations, ...approvedHomes];
+    // Only approved, active public homeowner listings are included in public discovery
+    // Exclude pending, declined, paused, and private listings
+    const approvedPublicHomes = homeChargers.filter(
+      c => c.status === 'approved' && (c.visibility === 'public' || !c.visibility)
+    );
+    return [...publicStations, ...approvedPublicHomes];
   }, [publicStations, homeChargers]);
+
+  // Compute straight-line distance from user coordinates to charger coordinates
+  // Distances remain null until a usable location is available
+  const chargersWithDistance = useMemo(() => {
+    return allChargers.map(st => {
+      let distKm = null;
+      let distText = null;
+      if (userLocation && Array.isArray(userLocation) && userLocation.length === 2) {
+        const lat = st.lat ?? st.latitude;
+        const lng = st.lng ?? st.lon ?? st.longitude;
+        if (typeof lat === 'number' && typeof lng === 'number' && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+          distKm = calculateDistanceKm(userLocation[0], userLocation[1], lat, lng);
+          distText = formatDistanceKm(distKm);
+        }
+      }
+      return {
+        ...st,
+        distanceKm: distKm,
+        distanceText: distText,
+      };
+    });
+  }, [allChargers, userLocation]);
 
   // 5. Rating stats per station (calculated from local reviews)
   const ratingsByStation = useMemo(() => {
     const map = {};
-    allChargers.forEach(st => {
+    chargersWithDistance.forEach(st => {
       const stationReviews = reviewsList.filter(r => String(r.station_id) === String(st.id));
       if (stationReviews.length === 0) {
         map[st.id] = { averageRating: null, reviewCount: 0 };
@@ -212,11 +267,11 @@ export default function App() {
       }
     });
     return map;
-  }, [allChargers, reviewsList]);
+  }, [chargersWithDistance, reviewsList]);
 
-  // 6. Charger filtering (by search, type: ALL | PUBLIC | HOME | DC_FAST | AC_SLOW, and region)
+  // 6. Charger filtering and sorting
   const filteredStations = useMemo(() => {
-    return allChargers.filter(st => {
+    const matched = chargersWithDistance.filter(st => {
       const titleStr = (st.title || '').toLowerCase();
       const addrStr = (st.address || st.exact_address || st.approx_address || '').toLowerCase();
       const operatorStr = (st.operator || st.owner_name || '').toLowerCase();
@@ -238,7 +293,12 @@ export default function App() {
       const matchRegion = regionFilter === 'ALL' || st.region === regionFilter;
       return matchSearch && matchType && matchRegion;
     });
-  }, [allChargers, search, typeFilter, regionFilter]);
+
+    if (sortBy === 'DISTANCE') {
+      return [...matched].sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+    }
+    return matched;
+  }, [chargersWithDistance, search, typeFilter, regionFilter, sortBy]);
 
   // Handle card click: focus station and smooth scroll map on mobile
   const handleStationClick = (st) => {
@@ -418,26 +478,37 @@ export default function App() {
     }
   };
 
-  // Geolocation helper
+  // Geolocation helper with clear privacy explanation and manual fallback
   const locateUser = () => {
     if (!navigator.geolocation) {
-      alert("Geolocation is not supported by your browser");
+      setLocationNotice({
+        type: 'warning',
+        text: 'Geolocation is not supported by your browser. Please select an area manually.'
+      });
+      setIsLocationModalOpen(true);
       return;
     }
+
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => {
         setUserLocation([coords.latitude, coords.longitude]);
+        setLocationNotice({
+          type: 'success',
+          text: `Location detected (${coords.latitude.toFixed(2)}, ${coords.longitude.toFixed(2)}). Distances updated.`
+        });
+        setTimeout(() => setLocationNotice(null), 4000);
       },
       (error) => {
         let msg = "Unable to retrieve your location.";
         if (error.code === error.PERMISSION_DENIED) {
-          msg = "Location permission denied. Please enable location access in browser settings to locate chargers near you.";
+          msg = "Location permission denied. Please select your area manually below to see distances and sort chargers.";
         } else if (error.code === error.POSITION_UNAVAILABLE) {
-          msg = "Location information is currently unavailable.";
+          msg = "Location information is currently unavailable. Please pick a nearby area manually.";
         } else if (error.code === error.TIMEOUT) {
-          msg = "Location request timed out. Please try again.";
+          msg = "Location request timed out. Please select an area manually.";
         }
-        alert(msg);
+        setLocationNotice({ type: 'warning', text: msg });
+        setIsLocationModalOpen(true);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
@@ -446,6 +517,30 @@ export default function App() {
   // RENDER ADMIN PORTAL IF ON ADMIN ROUTE / VIEW MODE
   if (viewMode === 'admin') {
     return <AdminPortal onExit={navigateToApp} />;
+  }
+
+  // RENDER SOS EMERGENCY CHARGER FINDER IF ON SOS ROUTE / VIEW MODE
+  if (viewMode === 'sos') {
+    return (
+      <SOSPage
+        onBack={navigateToApp}
+        allEligibleChargers={chargersWithDistance}
+        reportsByStation={reportsByStation}
+        initialUserLocation={userLocation}
+        onLocationDetected={(coords) => setUserLocation(coords)}
+        onNavigateToCharger={(charger) => {
+          navigateToApp();
+          setFocusedStation({ ...charger });
+          if (userLocation) {
+            setActiveRoute({ ...charger, _reqId: Date.now() });
+          }
+        }}
+        onRequestHomeBooking={(charger) => {
+          navigateToApp();
+          setSelectedBookingHomeCharger(charger);
+        }}
+      />
+    );
   }
 
   // RENDER MAIN DRIVER & HOMEOWNER DISCOVERY EXPERIENCE
@@ -471,6 +566,17 @@ export default function App() {
 
         {/* Header Action Buttons */}
         <div className="flex items-center space-x-1.5 sm:space-x-2">
+          {/* Urgent SOS Finder Button */}
+          <button 
+            type="button"
+            onClick={navigateToSOS}
+            className="flex items-center gap-1 sm:gap-1.5 bg-red-600 hover:bg-red-500 text-white font-black px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer shadow-md shadow-red-950/40 border border-red-400/40"
+            title="Emergency SOS EV Charger Finder"
+          >
+            <AlertCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white animate-pulse" />
+            <span>SOS</span>
+          </button>
+
           {activeRoute && (
             <button 
               type="button"
@@ -532,6 +638,26 @@ export default function App() {
         {/* Sidebar / Station List */}
         <aside className="order-2 md:order-1 w-full md:w-[450px] flex-1 md:flex-none md:h-full bg-gray-900 border-t md:border-t-0 md:border-r border-gray-800 flex flex-col z-10 shadow-2xl min-h-0">
           
+          {/* Urgent SOS Callout Banner */}
+          <div className="bg-gradient-to-r from-red-950/70 to-rose-950/50 border-b border-red-500/30 px-3 py-2 flex items-center justify-between text-xs shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="p-1 rounded-md bg-red-500/20 text-red-400 border border-red-500/30 shrink-0">
+                <AlertCircle className="w-3.5 h-3.5" />
+              </span>
+              <div className="leading-tight">
+                <div className="font-extrabold text-red-200 text-xs">Critically low on battery?</div>
+                <div className="text-[10px] text-gray-400">Emergency charger finder with compatibility check</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={navigateToSOS}
+              className="bg-red-600 hover:bg-red-500 text-white font-extrabold px-2.5 py-1 rounded-lg text-xs transition cursor-pointer shadow-sm shrink-0"
+            >
+              Open SOS
+            </button>
+          </div>
+
           {/* Phase 1 Local Notice Banner */}
           <div className="bg-emerald-950/40 border-b border-emerald-500/20 px-3 py-1.5 text-[11px] text-emerald-300 flex items-center justify-between shrink-0">
             <span className="flex items-center gap-1.5">
@@ -547,8 +673,8 @@ export default function App() {
             </button>
           </div>
 
-          {/* Search and Filters */}
-          <div className="p-2.5 sm:p-4 border-b border-gray-800 space-y-2 sm:space-y-3 bg-gray-900/90 backdrop-blur shrink-0 max-h-[120px]">
+          {/* Search, Filters, and Location Bar */}
+          <div className="p-2.5 sm:p-3 border-b border-gray-800 space-y-2 bg-gray-900/90 backdrop-blur shrink-0">
             <div className="relative">
               <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
               <input 
@@ -559,29 +685,62 @@ export default function App() {
                 className="w-full pl-9 pr-3 py-1.5 bg-gray-950 border border-gray-800 rounded-xl text-xs sm:text-sm text-gray-100 focus:outline-none focus:border-emerald-500 transition" 
               />
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <select 
                 value={typeFilter} 
                 onChange={e => setTypeFilter(e.target.value)} 
-                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-2 focus:outline-none focus:border-emerald-500"
+                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
               >
-                <option value="ALL">All Chargers (Public & Home)</option>
-                <option value="PUBLIC">⚡ Public Stations Only</option>
-                <option value="HOME">🏠 Rentable Home Chargers</option>
-                <option value="DC_FAST">⚡ DC Fast Only</option>
-                <option value="AC_SLOW">🔌 Level 2 AC Only</option>
+                <option value="ALL">All (Public & Home)</option>
+                <option value="PUBLIC">⚡ Public Only</option>
+                <option value="HOME">🏠 Home Chargers</option>
+                <option value="DC_FAST">⚡ DC Fast</option>
+                <option value="AC_SLOW">🔌 AC Slow</option>
               </select>
               <select 
                 value={regionFilter} 
                 onChange={e => setRegionFilter(e.target.value)} 
-                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-2 focus:outline-none focus:border-emerald-500"
+                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
               >
-                <option value="ALL">All NCR Regions</option>
+                <option value="ALL">All Regions</option>
                 <option value="Delhi">Delhi</option>
                 <option value="Gurugram">Gurugram</option>
                 <option value="Noida">Noida</option>
                 <option value="Ghaziabad">Ghaziabad</option>
               </select>
+              <select 
+                value={sortBy} 
+                onChange={e => setSortBy(e.target.value)} 
+                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
+                title={userLocation ? 'Sort chargers' : 'Enable location to sort by distance'}
+              >
+                <option value="DEFAULT">Recommended</option>
+                <option value="DISTANCE" disabled={!userLocation}>
+                  {userLocation ? '📍 Nearest First' : '📍 Nearest (Need GPS)'}
+                </option>
+              </select>
+            </div>
+
+            {/* Location Status / Area Selection Row */}
+            <div className="flex items-center justify-between text-[11px] text-gray-400 px-0.5 pt-0.5">
+              {userLocation ? (
+                <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                  <Locate className="w-3 h-3 text-emerald-400 shrink-0" />
+                  <span>Location active ({userLocation[0].toFixed(2)}, {userLocation[1].toFixed(2)})</span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-gray-500">
+                  <MapPin className="w-3 h-3 text-gray-500 shrink-0" />
+                  <span>Location not set (distances hidden)</span>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsLocationModalOpen(true)}
+                className="text-[10px] text-emerald-400 hover:underline font-semibold cursor-pointer"
+              >
+                {userLocation ? 'Change Area' : 'Set Area Manually'}
+              </button>
             </div>
           </div>
 
@@ -617,6 +776,11 @@ export default function App() {
                         <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">
                           Host: {st.owner_name}
                         </span>
+                        {st.distanceText && (
+                          <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                            📍 {st.distanceText}
+                          </span>
+                        )}
                       </div>
 
                       <span className="font-black text-purple-400 text-xs shrink-0">
@@ -711,6 +875,11 @@ export default function App() {
                       ) : (
                         <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-gray-800 text-gray-400 border-gray-700">
                           Normal Status
+                        </span>
+                      )}
+                      {st.distanceText && (
+                        <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          📍 {st.distanceText}
                         </span>
                       )}
                     </div>
@@ -1295,6 +1464,105 @@ export default function App() {
             >
               <CheckCircle2 className="w-5 h-5" /> Confirm Reservation
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* MODAL 5: MANUAL LOCATION / REGION SELECTION MODAL */}
+      {/* ====================================================================== */}
+      {isLocationModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md p-5 sm:p-6 relative shadow-2xl max-h-[90dvh] overflow-y-auto">
+            <button 
+              type="button"
+              onClick={() => setIsLocationModalOpen(false)} 
+              className="absolute top-4 right-4 text-gray-400 hover:text-white cursor-pointer"
+              aria-label="Close modal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            
+            <div className="flex items-center gap-2 mb-1">
+              <Locate className="w-5 h-5 text-emerald-400" />
+              <h3 className="font-bold text-lg text-gray-100">Set Your Location</h3>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Distances are calculated locally in your browser. Being signed in does not grant location permission. Coordinates are never stored or sent to a server.
+            </p>
+
+            {locationNotice && (
+              <div className={`p-2.5 rounded-xl text-xs mb-3 flex items-start gap-2 ${
+                locationNotice.type === 'success' 
+                  ? 'bg-emerald-950/60 border border-emerald-500/40 text-emerald-300' 
+                  : 'bg-amber-950/60 border border-amber-500/40 text-amber-300'
+              }`}>
+                <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{locationNotice.text}</span>
+              </div>
+            )}
+
+            <div className="space-y-2 mb-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLocationModalOpen(false);
+                  locateUser();
+                }}
+                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-sm"
+              >
+                <Locate className="w-4 h-4" />
+                <span>Request Browser Geolocation Access</span>
+              </button>
+            </div>
+
+            <div className="pt-3 border-t border-gray-800">
+              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                Or Select a Delhi NCR Landmark Area
+              </div>
+              <div className="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto custom-scrollbar">
+                {NCR_LANDMARK_PRESETS.map((preset) => (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => {
+                      setUserLocation([preset.lat, preset.lng]);
+                      setIsLocationModalOpen(false);
+                      setLocationNotice({
+                        type: 'success',
+                        text: `Location set to ${preset.name}. Distances updated.`
+                      });
+                      setTimeout(() => setLocationNotice(null), 3500);
+                    }}
+                    className="p-2.5 bg-gray-950 hover:bg-gray-800 border border-gray-800 hover:border-emerald-500/50 rounded-xl text-left transition flex items-center justify-between text-xs text-gray-200 cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <MapPin className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>{preset.name}</span>
+                    </span>
+                    <span className="text-[10px] text-gray-500 font-mono">
+                      {preset.lat.toFixed(2)}, {preset.lng.toFixed(2)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {userLocation && (
+              <div className="mt-4 pt-3 border-t border-gray-800 flex justify-between items-center text-xs">
+                <span className="text-gray-400">Current: [{userLocation[0].toFixed(3)}, {userLocation[1].toFixed(3)}]</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUserLocation(null);
+                    setIsLocationModalOpen(false);
+                  }}
+                  className="text-red-400 hover:underline text-[11px] cursor-pointer"
+                >
+                  Clear Location
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

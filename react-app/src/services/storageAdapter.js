@@ -31,6 +31,7 @@ export const STORAGE_KEYS = {
   COMPLAINTS: 'electrify_complaints',
   CHARGER_REQUESTS: 'electrify_charger_requests',
   ADMIN_AUDIT: 'electrify_admin_audit_log',
+  ADMIN_SESSION: 'electrify_admin_prototype_session',
 };
 
 // Expiration and Throttling constants
@@ -50,6 +51,7 @@ const memoryFallback = {
   [STORAGE_KEYS.COMPLAINTS]: null,
   [STORAGE_KEYS.CHARGER_REQUESTS]: null,
   [STORAGE_KEYS.ADMIN_AUDIT]: null,
+  [STORAGE_KEYS.ADMIN_SESSION]: null,
 };
 
 /**
@@ -153,6 +155,7 @@ function initializeSeedHomeChargers() {
         exact_address: 'Villa 24, Palm Drive, Sector 66, Gurugram',
         approx_address: 'Near Sector 66, Golf Course Ext Road, Gurugram',
         is_address_public: false, // Privacy enabled: drivers see approximate area until booking accepted
+        visibility: 'public', // Public listing: eligible for discovery once approved
         lat: 28.3980,
         lng: 77.0620,
         connector: 'Type 2 AC',
@@ -178,6 +181,7 @@ function initializeSeedHomeChargers() {
         exact_address: 'Tower 4, Flat 502, Sector 50, Noida',
         approx_address: 'Sector 50, Central Noida',
         is_address_public: false, // Privacy enabled
+        visibility: 'public',
         lat: 28.5720,
         lng: 77.3680,
         connector: 'Type 2 AC',
@@ -202,6 +206,7 @@ function initializeSeedHomeChargers() {
         exact_address: 'B-12, Vasant Vihar, New Delhi',
         approx_address: 'B-12, Vasant Vihar, New Delhi',
         is_address_public: true, // Public exact address
+        visibility: 'public',
         lat: 28.5580,
         lng: 77.1580,
         connector: '15A 3-Pin (Type 2 adapter available)',
@@ -227,6 +232,7 @@ function initializeSeedHomeChargers() {
         exact_address: 'Plot 88, Nyay Khand 1, Indirapuram, Ghaziabad',
         approx_address: 'Nyay Khand 1, Indirapuram, Ghaziabad',
         is_address_public: false,
+        visibility: 'private', // Private listing: only in owner dashboard, hidden from public map & SOS
         lat: 28.6410,
         lng: 77.3750,
         connector: 'Type 2 AC',
@@ -245,6 +251,19 @@ function initializeSeedHomeChargers() {
       }
     ];
     safeSetItem(STORAGE_KEYS.HOME_CHARGERS, seedHomeChargers);
+  } else {
+    // Migration: Ensure any existing stored chargers have visibility property defined
+    let changed = false;
+    const migrated = existing.map(c => {
+      if (!c.visibility) {
+        changed = true;
+        return { ...c, visibility: 'public' };
+      }
+      return c;
+    });
+    if (changed) {
+      safeSetItem(STORAGE_KEYS.HOME_CHARGERS, migrated);
+    }
   }
 }
 
@@ -330,6 +349,49 @@ initializeSeedComplaintsAndRequests();
  */
 export async function getStations() {
   return DELHI_NCR_STATIONS;
+}
+
+/**
+ * Calculates straight-line distance in kilometers between two geographic coordinates using Haversine formula.
+ * @param {number} lat1
+ * @param {number} lon1
+ * @param {number} lat2
+ * @param {number} lon2
+ * @returns {number|null}
+ */
+export function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return null;
+  const numLat1 = Number(lat1);
+  const numLon1 = Number(lon1);
+  const numLat2 = Number(lat2);
+  const numLon2 = Number(lon2);
+  if (Number.isNaN(numLat1) || Number.isNaN(numLon1) || Number.isNaN(numLat2) || Number.isNaN(numLon2)) return null;
+
+  const R = 6371; // Earth's mean radius in km
+  const dLat = (numLat2 - numLat1) * (Math.PI / 180);
+  const dLon = (numLon2 - numLon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(numLat1 * (Math.PI / 180)) * Math.cos(numLat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Sensibly formats straight-line distance in kilometers (e.g. "4.2 km away", "50 km away", "850 m away").
+ * @param {number|null} distanceKm
+ * @returns {string|null}
+ */
+export function formatDistanceKm(distanceKm) {
+  if (distanceKm == null || Number.isNaN(distanceKm) || distanceKm < 0) return null;
+  if (distanceKm < 1) {
+    return `${Math.round(distanceKm * 1000)} m away`;
+  }
+  if (distanceKm < 10) {
+    return `${distanceKm.toFixed(1)} km away`;
+  }
+  return `${Math.round(distanceKm)} km away`;
 }
 
 // ============================================================================
@@ -681,8 +743,15 @@ export function getHomeChargers(statusFilter = 'all') {
  * Safe for map rendering and public search.
  * @returns {Array<any>}
  */
+/**
+ * Returns only approved, active homeowner chargers that are currently rentable for EV drivers.
+ * Only includes approved, active PUBLIC homeowner listings in public discovery and SOS results.
+ * Excludes pending, declined, paused, and private listings.
+ * @returns {Array<any>}
+ */
 export function getApprovedHomeChargers() {
-  return getHomeChargers('approved');
+  const chargers = getHomeChargers('approved');
+  return chargers.filter(c => c.visibility === 'public' || !c.visibility);
 }
 
 /**
@@ -698,6 +767,7 @@ export function addHomeCharger(payload) {
   const exact_address = payload.exact_address || payload.full_address || payload.address;
   const approx_address = payload.approx_address;
   const is_address_public = payload.is_address_public ?? false;
+  const visibility = payload.visibility === 'private' ? 'private' : 'public';
   const lat = payload.lat ?? payload.latitude;
   const lng = payload.lng ?? payload.longitude;
   const connector = payload.connector || payload.connector_type;
@@ -748,6 +818,7 @@ export function addHomeCharger(payload) {
     exact_address: String(exact_address).trim().slice(0, 200),
     approx_address: derivedApprox.slice(0, 150),
     is_address_public: Boolean(is_address_public),
+    visibility, // 'public' | 'private'
     lat: validLat,
     lng: validLng,
     connector: String(connector).slice(0, 50),
@@ -1026,6 +1097,172 @@ export function updateComplaintStatus(complaintId, newStatus, adminNotes = '') {
 }
 
 /**
+ * Determines target recipient organization or host for a complaint.
+ * For a public charger, prepares it for the responsible municipality or local authority for that charger's area.
+ * For a home charger, prepares it for the relevant charger owner.
+ * @param {any} complaint
+ * @returns {{ type: 'municipality'|'host'|'general', recipient_name: string, department: string, contact: string, region: string, is_homeowner: boolean, charger_title: string }}
+ */
+export function determineComplaintRecipient(complaint) {
+  if (!complaint) {
+    return {
+      type: 'general',
+      recipient_name: 'Municipal Grievance Cell',
+      department: 'General EV Infrastructure Helpdesk',
+      contact: 'support@delhiev.org',
+      region: 'Delhi NCR',
+      is_homeowner: false,
+      charger_title: 'Unspecified Station',
+    };
+  }
+
+  // Check if it's a homeowner charger
+  const homeChargers = getHomeChargers('all');
+  const matchedHome = homeChargers.find(h => String(h.id) === String(complaint.charger_id));
+  if (matchedHome) {
+    return {
+      type: 'host',
+      authority_type: 'host',
+      recipient_name: matchedHome.owner_name,
+      department: 'Private Charger Host',
+      contact: matchedHome.owner_contact || 'Registered Host Contact (Stored Securely)',
+      region: matchedHome.region || 'Delhi NCR',
+      charger_title: matchedHome.title,
+      is_homeowner: true,
+    };
+  }
+
+  // Check public stations
+  const matchedPublic = DELHI_NCR_STATIONS.find(s => String(s.id) === String(complaint.charger_id));
+  const region = matchedPublic?.region || complaint.region || 'Delhi';
+
+  if (region === 'Gurugram') {
+    return {
+      type: 'municipality',
+      authority_type: 'municipality',
+      recipient_name: 'Gurugram Metropolitan Development Authority (GMDA)',
+      department: 'Smart City & EV Infrastructure Cell / DHBVN',
+      contact: 'ev.grievance@gmda.gov.in / 0124-2746600',
+      region: 'Gurugram',
+      charger_title: matchedPublic?.title || complaint.charger_title,
+      is_homeowner: false,
+    };
+  } else if (region === 'Noida' || region === 'Greater Noida') {
+    return {
+      type: 'municipality',
+      authority_type: 'municipality',
+      recipient_name: 'Noida Authority (New Okhla Industrial Development Authority)',
+      department: 'Traffic, Transportation & Power Distribution Wing (PVVNL)',
+      contact: 'ev.cell@noidaauthorityonline.in / 0120-2425025',
+      region: 'Noida',
+      charger_title: matchedPublic?.title || complaint.charger_title,
+      is_homeowner: false,
+    };
+  } else if (region === 'Ghaziabad') {
+    return {
+      type: 'municipality',
+      authority_type: 'municipality',
+      recipient_name: 'Ghaziabad Nagar Nigam (GNN)',
+      department: 'Municipal Works & Electrical Engineering Division',
+      contact: 'commissioner@nagarnigamghaziabad.com',
+      region: 'Ghaziabad',
+      charger_title: matchedPublic?.title || complaint.charger_title,
+      is_homeowner: false,
+    };
+  } else if (region === 'Faridabad') {
+    return {
+      type: 'municipality',
+      authority_type: 'municipality',
+      recipient_name: 'Municipal Corporation of Faridabad (MCF)',
+      department: 'Urban Development & EV Charging Node Taskforce',
+      contact: 'mcf.grievance@mcf.gov.in',
+      region: 'Faridabad',
+      charger_title: matchedPublic?.title || complaint.charger_title,
+      is_homeowner: false,
+    };
+  }
+
+  // Delhi Default (NDMC / MCD / DTL)
+  return {
+    type: 'municipality',
+    authority_type: 'municipality',
+    recipient_name: 'Delhi EV Cell (Delhi Transco Ltd / MCD / NDMC)',
+    department: 'Switch Delhi Municipal Grievance Redressal Unit',
+    contact: 'evcell.delhi@gov.in / 1800-11-2222',
+    region: 'Delhi',
+    charger_title: matchedPublic?.title || complaint.charger_title,
+    is_homeowner: false,
+  };
+}
+
+/**
+ * Resolves a complaint and stages it for dispatch to either the responsible municipality or charger host.
+ * If no delivery service or verified recipient is configured (as in this frontend prototype),
+ * records state as 'Resolved — delivery pending' and explains that it still needs to be sent.
+ * Keeps resolution, delivery attempt, and delivery confirmation as separate statuses.
+ * @param {string} complaintId
+ * @param {Object} payload
+ * @returns {{ success: boolean, complaint?: any }}
+ */
+export function resolveComplaintWithRouting(complaintId, payload = {}) {
+  const { 
+    routing_target, 
+    delivery_channel = 'unconfigured_local_staging', 
+    resolution_notes = '', 
+    staged_message = '' 
+  } = payload;
+
+  const list = getComplaints();
+  let updatedComplaint = null;
+
+  const updated = list.map(c => {
+    if (c.id === complaintId) {
+      const target = routing_target || determineComplaintRecipient(c);
+      const recipientName = target?.recipient_name || 'Designated Authority';
+      const targetType = target?.type || 'municipality';
+      const historyEntry = {
+        timestamp: new Date().toISOString(),
+        action: 'resolved_delivery_pending',
+        target_name: recipientName,
+        target_type: targetType,
+        delivery_channel,
+        delivery_status: 'pending_dispatch',
+        admin_notes: resolution_notes || c.admin_notes || '',
+      };
+      const existingHistory = Array.isArray(c.resolution_history) ? c.resolution_history : [];
+
+      updatedComplaint = {
+        ...c,
+        status: 'resolved',
+        resolution_status: 'resolved_delivery_pending', // Kept distinct from delivery
+        delivery_channel,
+        delivery_status: 'pending_dispatch',
+        routing_target: target,
+        staged_message,
+        resolution_notes: `Resolved — delivery pending (${recipientName})`,
+        admin_notes: resolution_notes || c.admin_notes,
+        resolved_at: new Date().toISOString(),
+        resolution_history: [...existingHistory, historyEntry],
+      };
+      return updatedComplaint;
+    }
+    return c;
+  });
+
+  safeSetItem(STORAGE_KEYS.COMPLAINTS, updated);
+  if (updatedComplaint) {
+    const target = updatedComplaint.routing_target;
+    recordAdminAudit(
+      'complaint_resolved_routing',
+      'complaint',
+      complaintId,
+      `Resolved & staged for ${target?.recipient_name || 'recipient'} (${target?.type || 'authority'}). Status: Resolved — delivery pending.`
+    );
+  }
+  return { success: Boolean(updatedComplaint), complaint: updatedComplaint };
+}
+
+/**
  * Retrieves public charger requests.
  * @returns {Array<any>}
  */
@@ -1057,7 +1294,7 @@ export function updateChargerRequestStatus(requestId, newStatus, adminNotes = ''
 }
 
 // ============================================================================
-// 8. ADMIN AUDIT & DECISION HISTORY
+// 8. ADMIN AUDIT & AUTHENTICATION PROTOTYPE
 // ============================================================================
 
 /**
@@ -1093,11 +1330,54 @@ export function getAdminAuditLog() {
   return Array.isArray(logs) ? logs : [];
 }
 
+/**
+ * Retrieves current prototype admin session from local storage.
+ * NOTE: Clearly documented as a client-side prototype. It is NOT a real security boundary.
+ * In production, server-side authentication with session tokens & RBAC is required.
+ * @returns {{ username: string, role: string, signed_in_at: string, is_prototype: boolean }|null}
+ */
+export function getAdminSession() {
+  return safeGetItem(STORAGE_KEYS.ADMIN_SESSION, null);
+}
+
+/**
+ * Sets prototype admin session.
+ * @param {{ username: string, role: string }} adminData
+ * @returns {Object}
+ */
+export function setAdminSession(adminData) {
+  const session = {
+    username: adminData?.username || 'Operations Lead',
+    role: adminData?.role || 'Senior EV Infrastructure Moderator',
+    signed_in_at: new Date().toISOString(),
+    is_prototype: true,
+  };
+  safeSetItem(STORAGE_KEYS.ADMIN_SESSION, session);
+  return session;
+}
+
+/**
+ * Clears prototype admin session (Sign Out).
+ */
+export function clearAdminSession() {
+  safeSetItem(STORAGE_KEYS.ADMIN_SESSION, null);
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(STORAGE_KEYS.ADMIN_SESSION);
+    }
+  } catch {
+    // fallback
+  }
+  return true;
+}
+
 // ============================================================================
 // EXPORT COMPREHENSIVE ADAPTER OBJECT
 // ============================================================================
 export const StorageAdapter = {
   getStations,
+  calculateDistanceKm,
+  formatDistanceKm,
   getActiveReports,
   getReportsByStation,
   getThrottleStatus,
@@ -1120,10 +1400,15 @@ export const StorageAdapter = {
   getComplaints,
   addComplaint,
   updateComplaintStatus,
+  determineComplaintRecipient,
+  resolveComplaintWithRouting,
   getChargerRequests,
   updateChargerRequestStatus,
   recordAdminAudit,
   getAdminAuditLog,
+  getAdminSession,
+  setAdminSession,
+  clearAdminSession,
 };
 
 export default StorageAdapter;
