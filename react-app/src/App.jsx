@@ -5,6 +5,7 @@ import HomeownerListingModal from './components/HomeownerListingModal';
 import HomeownerBookingModal from './components/HomeownerBookingModal';
 import AdminPortal from './components/AdminPortal';
 import SOSPage from './components/SOSPage';
+import SlideInSidePanel from './components/SlideInSidePanel';
 import {
   getStations,
   getReportsByStation,
@@ -94,6 +95,10 @@ export default function App() {
   const [userLocation, setUserLocation] = useState(null);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [locationNotice, setLocationNotice] = useState(null);
+
+  // Consistent Slide-In Side Panel state
+  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
+  const [sidePanelMode, setSidePanelMode] = useState('near_me'); // 'near_me' | 'charger_details'
 
   // Reactive time and local storage states
   const [now, setNow] = useState(() => Date.now());
@@ -470,12 +475,28 @@ export default function App() {
       return;
     }
     setActiveRoute({ ...st, _reqId: Date.now() });
+    setIsSidePanelOpen(false); // Automatically close side panel so map & route are visible
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
       const mapEl = document.getElementById('map-container');
       if (mapEl) {
         mapEl.scrollIntoView({ behavior: 'smooth' });
       }
     }
+  };
+
+  // Consistent Slide-In Side Panel handlers
+  const handleOpenNearMePanel = () => {
+    setSidePanelMode('near_me');
+    setIsSidePanelOpen(true);
+    if (!userLocation) {
+      locateUser();
+    }
+  };
+
+  const handleOpenChargerDetails = (charger) => {
+    setFocusedStation(charger);
+    setSidePanelMode('charger_details');
+    setIsSidePanelOpen(true);
   };
 
   // Geolocation helper with clear privacy explanation and manual fallback
@@ -612,9 +633,13 @@ export default function App() {
 
           <button 
             type="button"
-            onClick={locateUser} 
-            className="flex items-center gap-1 bg-gray-800 text-emerald-400 border border-emerald-500/30 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
-            title="Locate nearest chargers"
+            onClick={handleOpenNearMePanel} 
+            className={`flex items-center gap-1 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer ${
+              isSidePanelOpen && sidePanelMode === 'near_me'
+                ? 'bg-emerald-500 text-gray-950 font-bold shadow-md shadow-emerald-500/20'
+                : 'bg-gray-800 hover:bg-gray-700 text-emerald-400 border border-emerald-500/30'
+            }`}
+            title="Slide in nearby chargers ranked by distance"
           >
             <Locate className="w-3.5 h-3.5" /> 
             <span className="hidden min-[580px]:inline">Near Me</span>
@@ -724,15 +749,25 @@ export default function App() {
             {/* Location Status / Area Selection Row */}
             <div className="flex items-center justify-between text-[11px] text-gray-400 px-0.5 pt-0.5">
               {userLocation ? (
-                <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                <button
+                  type="button"
+                  onClick={handleOpenNearMePanel}
+                  className="flex items-center gap-1 text-emerald-400 font-medium hover:underline cursor-pointer"
+                  title="View nearby ranked chargers in side panel"
+                >
                   <Locate className="w-3 h-3 text-emerald-400 shrink-0" />
                   <span>Location active ({userLocation[0].toFixed(2)}, {userLocation[1].toFixed(2)})</span>
-                </span>
+                </button>
               ) : (
-                <span className="flex items-center gap-1 text-gray-500">
-                  <MapPin className="w-3 h-3 text-gray-500 shrink-0" />
-                  <span>Location not set (distances hidden)</span>
-                </span>
+                <button
+                  type="button"
+                  onClick={handleOpenNearMePanel}
+                  className="flex items-center gap-1 text-amber-400/90 hover:underline cursor-pointer"
+                  title="Tap to open Near Me side panel and rank chargers"
+                >
+                  <MapPin className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>Location not set &bull; Tap Near Me</span>
+                </button>
               )}
               <button
                 type="button"
@@ -822,6 +857,14 @@ export default function App() {
                       </button>
 
                       <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleOpenChargerDetails(st); }}
+                          className="bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white px-2 py-1.5 rounded-lg transition font-semibold cursor-pointer text-xs"
+                          title="View charger details in side panel"
+                        >
+                          Details
+                        </button>
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setSelectedBookingHomeCharger(st); }}
@@ -942,6 +985,14 @@ export default function App() {
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button 
                         type="button"
+                        onClick={(e) => { e.stopPropagation(); handleOpenChargerDetails(st); }} 
+                        className="bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white px-2 py-1.5 rounded-lg transition font-semibold cursor-pointer text-xs"
+                        title="View charger details in side panel"
+                      >
+                        Details
+                      </button>
+                      <button 
+                        type="button"
                         onClick={(e) => { e.stopPropagation(); openBooking(st); }} 
                         className="bg-gray-800 hover:bg-emerald-600 text-emerald-400 hover:text-white px-2.5 py-1.5 rounded-lg transition font-semibold cursor-pointer text-xs"
                       >
@@ -978,6 +1029,43 @@ export default function App() {
             ratingsByStation={ratingsByStation}
           />
         </main>
+
+        {/* Consistent Slide-In Side Panel */}
+        <SlideInSidePanel
+          isOpen={isSidePanelOpen}
+          onClose={() => setIsSidePanelOpen(false)}
+          panelMode={sidePanelMode}
+          onSetPanelMode={setSidePanelMode}
+          userLocation={userLocation}
+          onLocateMe={locateUser}
+          onSelectManualLocation={(preset) => {
+            setUserLocation([preset.lat, preset.lng]);
+            setLocationNotice({
+              type: 'success',
+              text: `Location set to ${preset.name}. Distances updated.`
+            });
+            setTimeout(() => setLocationNotice(null), 3500);
+          }}
+          landmarkPresets={NCR_LANDMARK_PRESETS}
+          chargersWithDistance={chargersWithDistance}
+          focusedCharger={focusedStation}
+          onSelectCharger={(charger) => {
+            setFocusedStation({ ...charger });
+            if (typeof window !== 'undefined' && window.innerWidth < 768) {
+              const mapEl = document.getElementById('map-container');
+              if (mapEl) {
+                mapEl.scrollIntoView({ behavior: 'smooth' });
+              }
+            }
+          }}
+          onStartRoute={startRoute}
+          onReserve={openBooking}
+          onRequestHomeBooking={(charger) => setSelectedBookingHomeCharger(charger)}
+          onOpenReport={openReportModal}
+          onOpenReviews={openReviewsModal}
+          reportsByStation={reportsByStation}
+          ratingsByStation={ratingsByStation}
+        />
       </div>
 
       {/* ====================================================================== */}
