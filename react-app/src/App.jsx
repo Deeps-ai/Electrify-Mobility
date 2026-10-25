@@ -5,7 +5,6 @@ import HomeownerListingModal from './components/HomeownerListingModal';
 import HomeownerBookingModal from './components/HomeownerBookingModal';
 import AdminPortal from './components/AdminPortal';
 import SOSPage from './components/SOSPage';
-import SlideInSidePanel from './components/SlideInSidePanel';
 import {
   getStations,
   getReportsByStation,
@@ -33,10 +32,11 @@ import {
   MessageSquare, 
   Info, 
   AlertTriangle,
-  Home,
-  Shield,
-  Lock,
-  AlertCircle
+  Home, 
+  Shield, 
+  Lock, 
+  AlertCircle,
+  ArrowLeft
 } from 'lucide-react';
 
 // Delhi NCR Area Landmark Presets for manual location fallback
@@ -88,7 +88,6 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [regionFilter, setRegionFilter] = useState('ALL');
-  const [sortBy, setSortBy] = useState('DEFAULT'); // 'DEFAULT' | 'DISTANCE'
   
   const [activeRoute, setActiveRoute] = useState(null);
   const [focusedStation, setFocusedStation] = useState(null);
@@ -96,9 +95,8 @@ export default function App() {
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [locationNotice, setLocationNotice] = useState(null);
 
-  // Consistent Slide-In Side Panel state
-  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
-  const [sidePanelMode, setSidePanelMode] = useState('near_me'); // 'near_me' | 'charger_details'
+  // Selected station for detailed view inside the sidebar
+  const [selectedStationDetails, setSelectedStationDetails] = useState(null);
 
   // Reactive time and local storage states
   const [now, setNow] = useState(() => Date.now());
@@ -299,11 +297,16 @@ export default function App() {
       return matchSearch && matchType && matchRegion;
     });
 
-    if (sortBy === 'DISTANCE') {
-      return [...matched].sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
-    }
-    return matched;
-  }, [chargersWithDistance, search, typeFilter, regionFilter, sortBy]);
+    // Strictly rank chargers by distance (Near Me: closest first)
+    return [...matched].sort((a, b) => {
+      if (a.distanceKm != null && b.distanceKm != null) {
+        return a.distanceKm - b.distanceKm;
+      }
+      if (a.distanceKm != null) return -1;
+      if (b.distanceKm != null) return 1;
+      return 0;
+    });
+  }, [chargersWithDistance, search, typeFilter, regionFilter]);
 
   // Handle card click: focus station and smooth scroll map on mobile
   const handleStationClick = (st) => {
@@ -471,11 +474,10 @@ export default function App() {
   // Routing helper
   const startRoute = (st) => {
     if (!userLocation) {
-      alert("Tap Near Me first to retrieve your location.");
+      alert("Tap Near Me or set your location first to calculate routes.");
       return;
     }
     setActiveRoute({ ...st, _reqId: Date.now() });
-    setIsSidePanelOpen(false); // Automatically close side panel so map & route are visible
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
       const mapEl = document.getElementById('map-container');
       if (mapEl) {
@@ -484,19 +486,13 @@ export default function App() {
     }
   };
 
-  // Consistent Slide-In Side Panel handlers
-  const handleOpenNearMePanel = () => {
-    setSidePanelMode('near_me');
-    setIsSidePanelOpen(true);
-    if (!userLocation) {
-      locateUser();
-    }
-  };
-
   const handleOpenChargerDetails = (charger) => {
+    setSelectedStationDetails(charger);
     setFocusedStation(charger);
-    setSidePanelMode('charger_details');
-    setIsSidePanelOpen(true);
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      const sidebarEl = document.querySelector('aside');
+      sidebarEl?.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   // Geolocation helper with clear privacy explanation and manual fallback
@@ -633,13 +629,20 @@ export default function App() {
 
           <button 
             type="button"
-            onClick={handleOpenNearMePanel} 
-            className={`flex items-center gap-1 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer ${
-              isSidePanelOpen && sidePanelMode === 'near_me'
-                ? 'bg-emerald-500 text-gray-950 font-bold shadow-md shadow-emerald-500/20'
-                : 'bg-gray-800 hover:bg-gray-700 text-emerald-400 border border-emerald-500/30'
-            }`}
-            title="Slide in nearby chargers ranked by distance"
+            onClick={() => {
+              if (selectedStationDetails) {
+                setSelectedStationDetails(null);
+              }
+              if (!userLocation) {
+                locateUser();
+              }
+              if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                const sidebarEl = document.querySelector('aside');
+                sidebarEl?.scrollIntoView({ behavior: 'smooth' });
+              }
+            }} 
+            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 text-emerald-400 border border-emerald-500/30 font-medium px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+            title="Locate nearest chargers"
           >
             <Locate className="w-3.5 h-3.5" /> 
             <span className="hidden min-[580px]:inline">Near Me</span>
@@ -710,11 +713,11 @@ export default function App() {
                 className="w-full pl-9 pr-3 py-1.5 bg-gray-950 border border-gray-800 rounded-xl text-xs sm:text-sm text-gray-100 focus:outline-none focus:border-emerald-500 transition" 
               />
             </div>
-            <div className="grid grid-cols-3 gap-1.5">
+            <div className="grid grid-cols-2 gap-1.5">
               <select 
                 value={typeFilter} 
                 onChange={e => setTypeFilter(e.target.value)} 
-                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
+                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-2 focus:outline-none focus:border-emerald-500 truncate"
               >
                 <option value="ALL">All (Public & Home)</option>
                 <option value="PUBLIC">⚡ Public Only</option>
@@ -725,7 +728,7 @@ export default function App() {
               <select 
                 value={regionFilter} 
                 onChange={e => setRegionFilter(e.target.value)} 
-                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
+                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-2 focus:outline-none focus:border-emerald-500 truncate"
               >
                 <option value="ALL">All Regions</option>
                 <option value="Delhi">Delhi</option>
@@ -733,60 +736,262 @@ export default function App() {
                 <option value="Noida">Noida</option>
                 <option value="Ghaziabad">Ghaziabad</option>
               </select>
-              <select 
-                value={sortBy} 
-                onChange={e => setSortBy(e.target.value)} 
-                className="bg-gray-950 border border-gray-800 text-gray-300 text-xs rounded-lg py-1.5 px-1.5 focus:outline-none focus:border-emerald-500 truncate"
-                title={userLocation ? 'Sort chargers' : 'Enable location to sort by distance'}
-              >
-                <option value="DEFAULT">Recommended</option>
-                <option value="DISTANCE" disabled={!userLocation}>
-                  {userLocation ? '📍 Nearest First' : '📍 Nearest (Need GPS)'}
-                </option>
-              </select>
             </div>
 
             {/* Location Status / Area Selection Row */}
             <div className="flex items-center justify-between text-[11px] text-gray-400 px-0.5 pt-0.5">
               {userLocation ? (
-                <button
-                  type="button"
-                  onClick={handleOpenNearMePanel}
-                  className="flex items-center gap-1 text-emerald-400 font-medium hover:underline cursor-pointer"
-                  title="View nearby ranked chargers in side panel"
-                >
-                  <Locate className="w-3 h-3 text-emerald-400 shrink-0" />
-                  <span>Location active ({userLocation[0].toFixed(2)}, {userLocation[1].toFixed(2)})</span>
-                </button>
+                <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
+                  <Locate className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>Near You [{userLocation[0].toFixed(2)}, {userLocation[1].toFixed(2)}]</span>
+                </div>
               ) : (
+                <div className="flex items-center gap-1 text-amber-400 font-medium">
+                  <MapPin className="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>Location not set</span>
+                </div>
+              )}
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={handleOpenNearMePanel}
-                  className="flex items-center gap-1 text-amber-400/90 hover:underline cursor-pointer"
-                  title="Tap to open Near Me side panel and rank chargers"
+                  onClick={locateUser}
+                  className="text-[10px] bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-bold px-2 py-0.5 rounded border border-emerald-500/40 transition cursor-pointer"
+                  title="Detect GPS"
                 >
-                  <MapPin className="w-3 h-3 text-amber-400 shrink-0" />
-                  <span>Location not set &bull; Tap Near Me</span>
+                  GPS
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setIsLocationModalOpen(true)}
-                className="text-[10px] text-emerald-400 hover:underline font-semibold cursor-pointer"
-              >
-                {userLocation ? 'Change Area' : 'Set Area Manually'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setIsLocationModalOpen(true)}
+                  className="text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 font-semibold px-2 py-0.5 rounded border border-gray-700 transition cursor-pointer"
+                  title="Select Delhi NCR Area"
+                >
+                  {userLocation ? 'Change Area' : 'Set Area'}
+                </button>
+              </div>
             </div>
           </div>
 
           <div className="px-3 sm:px-4 py-2 bg-gray-950 border-b border-gray-800/80 flex justify-between text-xs font-semibold text-gray-400 shrink-0">
-            <span className="flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-emerald-400" /> AVAILABLE IN NCR</span>
-            <span className="text-emerald-400 font-bold">{filteredStations.length} Chargers</span>
+            <span className="flex items-center gap-1.5">
+              <Locate className="w-3.5 h-3.5 text-emerald-400" />
+              <span>NEARBY IN NCR (RANKED BY DISTANCE)</span>
+            </span>
+            <span className="text-emerald-400 font-bold">{filteredStations.length} Nearest</span>
           </div>
 
-          {/* Scrollable station cards list */}
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 sm:p-4 space-y-2.5 sm:space-y-3 safe-bottom min-h-0">
-            {filteredStations.map(st => {
+          {/* Details View when a station is selected, otherwise Near Me Ranked List */}
+          {selectedStationDetails ? (
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 sm:p-4 space-y-4 safe-bottom min-h-0">
+              {/* Back to Near Me List Button */}
+              <button
+                type="button"
+                onClick={() => setSelectedStationDetails(null)}
+                className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-emerald-400 font-bold transition cursor-pointer py-1"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Back to Nearby Chargers</span>
+              </button>
+
+              {/* Station Overview Header Card */}
+              <div className="bg-gray-950 p-4 rounded-2xl border border-gray-800 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded border ${
+                    selectedStationDetails.is_homeowner 
+                      ? 'bg-purple-500/10 text-purple-400 border-purple-500/30' 
+                      : selectedStationDetails.type === 'DC_FAST' 
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
+                      : 'bg-blue-500/10 text-blue-400 border-blue-500/30'
+                  }`}>
+                    {selectedStationDetails.is_homeowner ? '🏠 Rentable Home Charger' : selectedStationDetails.type === 'DC_FAST' ? '⚡ DC Fast Station' : '🔌 Level 2 AC Station'}
+                  </span>
+
+                  {selectedStationDetails.distanceText && (
+                    <span className="text-[11px] font-extrabold text-emerald-400 bg-emerald-950 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      📍 {selectedStationDetails.distanceText}
+                    </span>
+                  )}
+                </div>
+
+                <h3 className="text-base font-extrabold text-gray-100 leading-snug">
+                  {selectedStationDetails.title}
+                </h3>
+                
+                <p className="text-xs text-gray-400 flex items-start gap-1">
+                  <MapPin className="w-3.5 h-3.5 text-gray-500 shrink-0 mt-0.5" />
+                  <span>
+                    {selectedStationDetails.is_homeowner 
+                      ? (selectedStationDetails.is_address_public ? selectedStationDetails.exact_address : selectedStationDetails.approx_address) 
+                      : selectedStationDetails.address}
+                  </span>
+                </p>
+
+                {selectedStationDetails.is_homeowner && !selectedStationDetails.is_address_public && (
+                  <div className="text-[11px] text-purple-300 bg-purple-950/40 p-2 rounded-xl border border-purple-900/40 flex items-start gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-purple-400 shrink-0 mt-0.5" />
+                    <span>Approximate area shown to protect host privacy. Exact address is provided upon booking confirmation.</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Specifications Grid */}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="bg-gray-950 p-3 rounded-xl border border-gray-800">
+                  <span className="text-[10px] text-gray-500 uppercase font-bold block mb-0.5">Charging Speed</span>
+                  <strong className="text-sm text-gray-100 font-extrabold">
+                    {selectedStationDetails.kw || selectedStationDetails.power_kw} kW
+                  </strong>
+                </div>
+                <div className="bg-gray-950 p-3 rounded-xl border border-gray-800">
+                  <span className="text-[10px] text-gray-500 uppercase font-bold block mb-0.5">Tariff / Rate</span>
+                  <strong className="text-sm text-emerald-400 font-extrabold">
+                    {selectedStationDetails.price || 'Standard tariffs'}
+                  </strong>
+                </div>
+                <div className="col-span-2 bg-gray-950 p-3 rounded-xl border border-gray-800">
+                  <span className="text-[10px] text-gray-500 uppercase font-bold block mb-0.5">Connectors & Guns</span>
+                  <span className="text-gray-200 font-semibold">
+                    {selectedStationDetails.connectors?.join(', ') || selectedStationDetails.connector || 'Standard Port'}
+                  </span>
+                </div>
+                {selectedStationDetails.schedule && (
+                  <div className="col-span-2 bg-gray-950 p-3 rounded-xl border border-gray-800 flex items-center justify-between text-xs">
+                    <span className="text-gray-400 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Availability Hours:</span>
+                    </span>
+                    <strong className="text-gray-200">{selectedStationDetails.schedule}</strong>
+                  </div>
+                )}
+              </div>
+
+              {/* Live Status Report */}
+              <div className="bg-gray-950 p-3.5 rounded-xl border border-gray-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
+                    <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Live Community Status</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openReportModal(selectedStationDetails)}
+                    className="text-[11px] text-emerald-400 hover:underline font-bold cursor-pointer"
+                  >
+                    + Report Update
+                  </button>
+                </div>
+
+                {reportsByStation[selectedStationDetails.id] ? (
+                  <div className="text-xs bg-gray-900 p-2.5 rounded-lg border border-gray-800 space-y-1">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold">
+                        {reportsByStation[selectedStationDetails.id].status === 'working' ? '🟢 Reported Working' : reportsByStation[selectedStationDetails.id].status === 'occupied' ? '🟡 Reported Occupied' : '🔴 Reported Broken'}
+                      </span>
+                      <span className="text-[10px] text-gray-400">
+                        {reportsByStation[selectedStationDetails.id].minutesAgo === 0 ? 'just now' : `${reportsByStation[selectedStationDetails.id].minutesAgo}m ago`}
+                      </span>
+                    </div>
+                    {reportsByStation[selectedStationDetails.id].note && (
+                      <p className="text-gray-400 italic text-[11px]">
+                        &ldquo;{reportsByStation[selectedStationDetails.id].note}&rdquo;
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-gray-500 italic">
+                    No community updates in the past 2 hours. Standard operational status applies.
+                  </p>
+                )}
+              </div>
+
+              {/* Driver Reviews Row */}
+              <div className="bg-gray-950 p-3.5 rounded-xl border border-gray-800 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-gray-300 block">Driver Reviews & Rating</span>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                    <span className="text-xs font-bold text-amber-400">
+                      {ratingsByStation[selectedStationDetails.id]?.averageRating ? `${ratingsByStation[selectedStationDetails.id].averageRating} / 5.0` : 'No reviews yet'}
+                    </span>
+                    <span className="text-[10px] text-gray-500">
+                      ({ratingsByStation[selectedStationDetails.id]?.reviewCount || 0} reviews)
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openReviewsModal(selectedStationDetails)}
+                  className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 text-xs font-bold rounded-lg transition cursor-pointer"
+                >
+                  View Reviews
+                </button>
+              </div>
+
+              {/* Primary Action Buttons */}
+              <div className="pt-2 border-t border-gray-800 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => startRoute(selectedStationDetails)}
+                  className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white font-extrabold rounded-xl text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer shadow-lg"
+                >
+                  <Navigation className="w-4 h-4" />
+                  <span>Start Route on Map</span>
+                </button>
+
+                {selectedStationDetails.is_homeowner ? (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedBookingHomeCharger(selectedStationDetails)}
+                    className="flex-1 py-3 bg-purple-600 hover:bg-purple-500 text-white font-extrabold rounded-xl text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer shadow-lg"
+                  >
+                    <Home className="w-4 h-4" />
+                    <span>Book with Host</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => openBooking(selectedStationDetails)}
+                    className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold rounded-xl text-xs sm:text-sm transition flex items-center justify-center gap-2 cursor-pointer shadow-lg"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Reserve Slot</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 sm:p-4 space-y-2.5 sm:space-y-3 safe-bottom min-h-0">
+              {/* Location prompt when location is not set */}
+              {!userLocation && (
+                <div className="bg-amber-950/40 border border-amber-500/30 p-3 rounded-xl text-xs space-y-2 text-amber-200">
+                  <div className="flex items-start gap-2">
+                    <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold">Set Location to Rank Near You</div>
+                      <div className="text-[11px] text-amber-300/80 mt-0.5">
+                        Enable GPS or choose a Delhi NCR area to see all nearby chargers ranked by distance.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={locateUser}
+                      className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1 transition cursor-pointer shadow-sm"
+                    >
+                      <Locate className="w-3.5 h-3.5" /> Detect GPS
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsLocationModalOpen(true)}
+                      className="flex-1 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold rounded-lg text-xs flex items-center justify-center gap-1 transition cursor-pointer"
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-emerald-400" /> Select Area
+                    </button>
+                  </div>
+                </div>
+              )}
+              {filteredStations.map(st => {
               const ratingStats = ratingsByStation[st.id];
 
               // ======================================================
@@ -1011,6 +1216,7 @@ export default function App() {
               );
             })}
           </div>
+        )}
         </aside>
 
         {/* Map Area */}
@@ -1029,43 +1235,6 @@ export default function App() {
             ratingsByStation={ratingsByStation}
           />
         </main>
-
-        {/* Consistent Slide-In Side Panel */}
-        <SlideInSidePanel
-          isOpen={isSidePanelOpen}
-          onClose={() => setIsSidePanelOpen(false)}
-          panelMode={sidePanelMode}
-          onSetPanelMode={setSidePanelMode}
-          userLocation={userLocation}
-          onLocateMe={locateUser}
-          onSelectManualLocation={(preset) => {
-            setUserLocation([preset.lat, preset.lng]);
-            setLocationNotice({
-              type: 'success',
-              text: `Location set to ${preset.name}. Distances updated.`
-            });
-            setTimeout(() => setLocationNotice(null), 3500);
-          }}
-          landmarkPresets={NCR_LANDMARK_PRESETS}
-          chargersWithDistance={chargersWithDistance}
-          focusedCharger={focusedStation}
-          onSelectCharger={(charger) => {
-            setFocusedStation({ ...charger });
-            if (typeof window !== 'undefined' && window.innerWidth < 768) {
-              const mapEl = document.getElementById('map-container');
-              if (mapEl) {
-                mapEl.scrollIntoView({ behavior: 'smooth' });
-              }
-            }
-          }}
-          onStartRoute={startRoute}
-          onReserve={openBooking}
-          onRequestHomeBooking={(charger) => setSelectedBookingHomeCharger(charger)}
-          onOpenReport={openReportModal}
-          onOpenReviews={openReviewsModal}
-          reportsByStation={reportsByStation}
-          ratingsByStation={ratingsByStation}
-        />
       </div>
 
       {/* ====================================================================== */}
