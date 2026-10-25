@@ -91,7 +91,7 @@ const isValidLatLngTuple = (loc) => {
 };
 
 const getMarkerColor = (status, isFast) => {
-  if (status === 'working') return '#10b981'; // green
+  if (status === 'working') return '#10b981'; // emerald green
   if (status === 'broken') return '#ef4444'; // red
   if (status === 'occupied') return '#f59e0b'; // amber
   return isFast ? '#10b981' : '#3b82f6'; // default by charger type
@@ -102,6 +102,7 @@ const iconCache = new Map();
 
 /**
  * Returns a memoized L.divIcon instance based on status and charger speed.
+ * Includes distinct shapes/icons and aria-labels so color alone is not required for accessibility.
  * @param {string|null|undefined} status
  * @param {boolean} isFast
  * @returns {L.DivIcon}
@@ -116,17 +117,45 @@ const getStationIcon = (status, isFast) => {
   let cached = iconCache.get(cacheKey);
   if (!cached) {
     const color = getMarkerColor(status, isFast);
-    const svgPoints = isFast
-      ? '13 2 3 14 12 14 11 22 21 10 12 10 13 2'
-      : '6 2 18 2 18 7 14 7 14 11 14 22 10 22 10 11 6 11 6 7 6 2';
+
+    let innerSvg = '';
+    let accessibleLabel = '';
+
+    if (normalizedStatus === 'working') {
+      // Checkmark icon for Working
+      innerSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      accessibleLabel = 'Status: Working (Reported active)';
+    } else if (normalizedStatus === 'broken') {
+      // X icon for Broken
+      innerSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+      accessibleLabel = 'Status: Broken (Reported unavailable)';
+    } else if (normalizedStatus === 'occupied') {
+      // Clock/wait icon for Occupied
+      innerSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
+      accessibleLabel = 'Status: Occupied (In use)';
+    } else if (isFast) {
+      // Lightning bolt for DC Fast
+      innerSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>';
+      accessibleLabel = 'DC Fast Charger (Standard operational)';
+    } else {
+      // Plug icon for AC Slow
+      innerSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 2 18 2 18 7 14 7 14 11 14 22 10 22 10 11 6 11 6 7 6 2"></polygon></svg>';
+      accessibleLabel = 'AC Slow Charger (Standard operational)';
+    }
 
     cached = L.divIcon({
       className: '',
       iconSize: [32, 32],
       iconAnchor: [16, 32],
+      popupAnchor: [0, -32],
       html: `
-        <div style="width:32px; height:32px; border-radius:50%; border:2px solid #030712; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 15px -3px rgba(0,0,0,0.5); background-color: ${color}; color:#030712;">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="${svgPoints}"></polygon></svg>
+        <div 
+          role="img" 
+          aria-label="${accessibleLabel}" 
+          title="${accessibleLabel}"
+          style="width:32px; height:32px; border-radius:50%; border:2px solid #030712; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 15px -3px rgba(0,0,0,0.5); background-color: ${color}; color:#030712;"
+        >
+          ${innerSvg}
         </div>`
     });
     iconCache.set(cacheKey, cached);
@@ -313,6 +342,7 @@ function MapController({ focusedStation, activeRoute, userLocation, onRouteError
  * @typedef {Object} StationReport
  * @property {'working'|'broken'|'occupied'|string} [status] - Current operational status
  * @property {number|string} [minutesAgo] - Minutes elapsed since status report
+ * @property {string} [note] - Optional user note
  * @property {number} [wait_minutes] - Estimated wait time in minutes
  */
 
@@ -325,7 +355,9 @@ function MapController({ focusedStation, activeRoute, userLocation, onRouteError
  * @property {(station: Station) => void} onReserve - Callback triggered when reserving a station
  * @property {(station: Station) => void} onRoute - Callback triggered when requesting route to a station
  * @property {((station: Station) => void)|null} [onReport] - Optional callback triggered to report station status
+ * @property {((station: Station) => void)|null} [onOpenReviews] - Optional callback to view and submit reviews
  * @property {Record<string|number, StationReport>} [reportsByStation] - Station status reports indexed by station id
+ * @property {Record<string|number, { averageRating: number|null, reviewCount: number }>} [ratingsByStation] - Station rating stats
  * @property {((error: Error | unknown) => void)} [onRouteError] - Optional callback when routing fails
  */
 
@@ -341,7 +373,9 @@ export default function MapComponent({
   onReserve, 
   onRoute, 
   onReport, 
+  onOpenReviews,
   reportsByStation = {},
+  ratingsByStation = {},
   onRouteError
 }) {
   const [routeErrorToast, setRouteErrorToast] = useState(null);
@@ -376,7 +410,7 @@ export default function MapComponent({
     }
   }, [onRouteError]);
 
-  // Memoize station markers keyed on stations and reportsByStation
+  // Memoize station markers keyed on stations, reportsByStation, and ratingsByStation
   const stationMarkers = useMemo(() => {
     if (!Array.isArray(stations)) {
       return null;
@@ -388,6 +422,7 @@ export default function MapComponent({
         const report = reportsByStation?.[st.id];
         const status = report?.status;
         const statusText = status === 'working' ? 'Working' : status === 'broken' ? 'Broken' : status === 'occupied' ? 'Occupied' : null;
+        const statusBadgeLabel = status === 'working' ? '🟢 Working' : status === 'broken' ? '🔴 Broken' : status === 'occupied' ? '🟡 Occupied' : null;
         const statusColor = status === 'working' ? 'bg-emerald-100 text-emerald-800' : status === 'broken' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
 
         // Fallbacks for missing fields
@@ -398,8 +433,10 @@ export default function MapComponent({
 
         // Guard report.minutesAgo
         const minutesAgoText = (report?.minutesAgo !== undefined && report?.minutesAgo !== null && report?.minutesAgo !== '')
-          ? `${report.minutesAgo} min ago`
+          ? (Number(report.minutesAgo) === 0 ? 'just now' : `${report.minutesAgo} min ago`)
           : 'recently';
+
+        const ratingStats = ratingsByStation?.[st.id];
 
         return (
           <Marker 
@@ -415,24 +452,59 @@ export default function MapComponent({
                 </div>
 
                 {statusText ? (
-                  <div className="my-1.5 flex items-center justify-between text-[11px] bg-gray-100 p-1.5 rounded-lg border border-gray-200">
-                    <span className={`px-1.5 py-0.5 rounded font-extrabold text-[10px] uppercase ${statusColor}`}>
-                      {statusText}
-                    </span>
-                    <span className="text-gray-500 text-[10px]">
-                      Updated {minutesAgoText}
-                    </span>
+                  <div className="my-1.5 p-1.5 rounded-lg border border-gray-200 bg-gray-50 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className={`px-1.5 py-0.5 rounded font-extrabold text-[10px] uppercase ${statusColor}`}>
+                        {statusBadgeLabel}
+                      </span>
+                      <span className="text-gray-500 text-[10px] font-medium">
+                        Updated {minutesAgoText}
+                      </span>
+                    </div>
+                    {report?.note && (
+                      <p className="mt-1 text-[10px] text-gray-700 bg-white/90 p-1 rounded border border-gray-200 leading-snug italic break-words">
+                        &ldquo;{report.note}&rdquo;
+                      </p>
+                    )}
+                    {report?.wait_minutes > 0 && (
+                      <span className="text-amber-700 font-semibold text-[10px] block mt-0.5">
+                        ⏱ Est. wait: ~{report.wait_minutes} min
+                      </span>
+                    )}
                   </div>
                 ) : (
-                  <div className="my-1 text-[10px] text-gray-400 italic">
-                    No status reports in last 2 hrs
+                  <div className="my-1.5 p-1.5 rounded-lg border border-emerald-200 bg-emerald-50/70 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className="px-1.5 py-0.5 rounded font-extrabold text-[10px] uppercase bg-emerald-100 text-emerald-800">
+                        🟢 Normal Status
+                      </span>
+                      <span className="text-[10px] text-emerald-700 font-semibold">Operational</span>
+                    </div>
+                    <p className="text-[10px] text-gray-500 mt-0.5 italic">
+                      No community reports in last 2 hrs
+                    </p>
                   </div>
                 )}
 
                 <h4 className="font-bold text-gray-900 text-sm mt-1 leading-snug">{title}</h4>
                 <p className="text-xs text-gray-600 mt-0.5 leading-tight line-clamp-2">{address}</p>
+
+                {/* Rating button / summary row */}
+                <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between">
+                  <button 
+                    type="button"
+                    onClick={() => onOpenReviews?.(st)}
+                    className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>⭐ {ratingStats?.averageRating ? `${ratingStats.averageRating} (${ratingStats.reviewCount})` : 'No reviews'}</span>
+                    <span className="text-[10px] font-normal text-gray-500">· Reviews</span>
+                  </button>
+                  <span className="text-[10px] font-semibold text-gray-500">
+                    {st.type === 'DC_FAST' ? '⚡ DC Fast' : '🔌 AC Slow'}
+                  </span>
+                </div>
                 
-                <div className="flex gap-1.5 mt-3">
+                <div className="flex gap-1.5 mt-2.5">
                   <button 
                     type="button"
                     onClick={() => onReserve?.(st)} 
@@ -462,7 +534,7 @@ export default function MapComponent({
           </Marker>
         );
       });
-  }, [stations, reportsByStation, onReserve, onRoute, onReport]);
+  }, [stations, reportsByStation, ratingsByStation, onReserve, onRoute, onReport, onOpenReviews]);
 
   return (
     <div className="h-full w-full relative min-h-[250px] md:min-h-0">
@@ -492,6 +564,19 @@ export default function MapComponent({
         >
           <span>🗺️ Street</span>
         </button>
+      </div>
+
+      {/* Accessible Marker Legend */}
+      <div 
+        role="region"
+        aria-label="Map Marker Color Legend"
+        className="absolute bottom-2 left-2 z-[1000] bg-gray-900/90 border border-gray-700/80 rounded-xl px-2.5 py-1.5 text-[10px] text-gray-300 shadow-lg backdrop-blur-md hidden sm:flex items-center gap-2.5 pointer-events-auto"
+      >
+        <span className="font-bold text-gray-200">Legend:</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block border border-gray-950"></span> Working (✓)</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block border border-gray-950"></span> Occupied (⏱)</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block border border-gray-950"></span> Broken (✕)</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block border border-gray-950"></span> Default (Speed)</span>
       </div>
 
       {/* Non-blocking inline routing error toast */}
